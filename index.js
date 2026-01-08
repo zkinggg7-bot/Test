@@ -2,14 +2,14 @@ const axios = require('axios');
 const cheerio = require('cheerio');
 const iconv = require('iconv-lite');
 
-const targetUrl = 'https://www.69shuba.com/txt/87906/39867326';
+// تحديث الرابط المستهدف للموقع الجديد
+const targetUrl = 'https://www.novel543.com/1227676079/8095_1128.html';
 
 async function scrapeWithFinalSolution() {
     try {
-        console.log(`[LOG] محاولة الجلب عبر جسر Proxy لتجاوز حظر الـ IP...`);
+        console.log(`[LOG] محاولة جلب البيانات من الموقع الجديد عبر جسر Proxy...`);
 
-        // استخدام خدمة Proxy مجانية تماماً لتغيير الـ IP الخاص بـ Railway
-        // سنطلب البيانات بصيغة Base64 لتجنب مشاكل الترميز الصيني
+        // استخدام خدمة Proxy لتغيير الـ IP وضمان الوصول
         const bridgeUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}`;
 
         const response = await axios.get(bridgeUrl, { timeout: 30000 });
@@ -18,40 +18,43 @@ async function scrapeWithFinalSolution() {
             throw new Error("لم يتم الحصول على استجابة من جسر الـ Proxy.");
         }
 
-        // معالجة البيانات القادمة من الجسر
         const htmlContent = response.data.contents;
         const $ = cheerio.load(htmlContent);
 
-        // استخراج العنوان
-        const title = $('h1').last().text().trim();
+        // --- تحديث الاستخراج ليتناسب مع الموقع الجديد ---
+        
+        // 1. استخراج العنوان (موجود داخل h1 في الموقع الجديد)
+        const title = $('.chapter-content h1').text().trim();
 
         if (!title) {
-            // إذا لم نجد عنواناً، فهذا يعني أن الجسر نفسه قد يكون محظوراً أو الصفحة لم تُحمل
-            throw new Error("فشل استخراج البيانات. قد يكون الموقع قد حظر الجسر أيضاً.");
+            throw new Error("فشل استخراج العنوان. قد تكون هيكلية الصفحة مختلفة أو هناك حظر.");
         }
 
-        // تنظيف المحتوى
-        $('.txtnav script, .txtnav .contentadv, .txtnav .txtinfo, .txtnav h1').remove();
-        let content = $('.txtnav').text();
+        // 2. تنظيف المحتوى (إزالة الإعلانات والوسوم غير المرغوبة داخل المحتوى)
+        // الموقع الجديد يضع النص داخل div.content
+        $('.content.py-5 .gadBlock, .content.py-5 .adBlock, .content.py-5 script, .content.py-5 div').remove();
         
-        // تنظيف النصوص
+        let content = $('.content.py-5').text();
+        
+        // 3. تنظيف النصوص من الفراغات والرموز الزائدة
         content = content
             .replace(/\t/g, '')
-            .replace(/\(本章完\)/g, '')
             .replace(/\n\s*\n/g, '\n\n')
             .trim();
 
-        const nextUrl = $('.page1 a:contains("下一章")').attr('href') || 
-                        $('.page1 a').last().attr('href');
+        // 4. استخراج رابط الفصل التالي
+        // الموقع الجديد يضع الروابط في متغيرات js أو في أزرار التنقل تحت اسم "下一章"
+        const nextUrl = $('.foot-nav a:contains("下一章")').attr('href');
+        const fullNextUrl = nextUrl ? (nextUrl.startsWith('http') ? nextUrl : `https://www.novel543.com${nextUrl}`) : null;
 
-        console.log(`[SUCCESS] نجحت الخطة! تم كسر الحظر وجلب الفصل: ${title}`);
+        console.log(`[SUCCESS] تم جلب الفصل بنجاح: ${title}`);
         
         return {
             status: 'success',
             data: {
                 title,
-                nextChapter: nextUrl,
-                content: content.substring(0, 1000) // إرسال أول 1000 حرف
+                nextChapter: fullNextUrl,
+                content: content // إرسال النص كاملاً
             }
         };
 
@@ -59,14 +62,15 @@ async function scrapeWithFinalSolution() {
         console.error(`[ERROR] ${error.message}`);
         return {
             status: 'error',
-            message: `فشل تجاوز الحماية: ${error.message}`,
-            suggestion: "الموقع محمي بشدة، قد نحتاج لاستخدام بروكسي مدفوع أو العودة لمتصفح Puppeteer رغم استهلاكه للموارد."
+            message: `فشل تجاوز الحماية أو استخراج البيانات: ${error.message}`,
+            suggestion: "تأكد من أن روابط الموقع لا تزال تعمل، أو جرب تحديث الـ Selectors إذا قام الموقع بتغيير تصميمه."
         };
     }
 }
 
 const http = require('http');
 const server = http.createServer(async (req, res) => {
+    // دعم اللغة العربية والصينية في الاستجابة
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
 
     if (req.url === '/test') {
@@ -76,9 +80,9 @@ const server = http.createServer(async (req, res) => {
     } else {
         res.writeHead(200);
         res.end(JSON.stringify({ 
-            status: 'Proxy Bridge Mode Active',
+            status: 'Novel543 Scraper Active',
             endpoint: '/test',
-            note: 'Using external bridge to bypass 403 error.'
+            note: 'Current target: https://www.novel543.com'
         }));
     }
 });
