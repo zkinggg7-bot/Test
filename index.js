@@ -2,76 +2,82 @@ const axios = require('axios');
 const cheerio = require('cheerio');
 const iconv = require('iconv-lite');
 
-// الرابط الذي أرسلته لي كنموذج للتجربة
+// الرابط المستهدف
 const targetUrl = 'https://www.69shuba.com/txt/87906/39867326';
 
 async function scrapeChapter() {
     try {
         console.log(`جاري جلب الفصل من: ${targetUrl}...`);
 
-        // جلب الصفحة كمصفوفة بايتات (Buffer) لكي نتمكن من تحويل الترميز لاحقاً
         const response = await axios.get(targetUrl, {
             responseType: 'arraybuffer',
+            timeout: 10000, // مهلة 10 ثواني
             headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36'
+                // تحديث الـ Headers لمحاكاة متصفح حقيقي بشكل أفضل
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+                'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+                'Referer': 'https://www.69shuba.com/',
+                'Connection': 'keep-alive',
+                'Cache-Control': 'max-age=0'
             }
         });
 
-        // تحويل المحتوى من ترميز GBK إلى UTF-8 لكي يظهر النص الصيني صحيحاً
         const html = iconv.decode(response.data, 'gbk');
         const $ = cheerio.load(html);
 
-        // 1. استخراج العنوان
-        const title = $('h1').text().trim();
+        // استخراج العنوان
+        const title = $('h1').text().trim() || 'لم يتم العثور على عنوان';
 
-        // 2. استخراج المحتوى (تنظيف النص من الإعلانات والسكريبتات)
-        // الموقع يضع النص داخل .txtnav، سنقوم بحذف العناصر غير المرغوبة
+        // تنظيف المحتوى
         $('.txtnav .contentadv').remove();
         $('.txtnav script').remove();
         $('.txtnav h1').remove();
         $('.txtnav .txtinfo').remove();
 
-        // الحصول على النص المتبقي وتنظيف الفراغات الزائدة
         let content = $('.txtnav').text();
-        
-        // تنظيف بسيط للنص (إزالة الفراغات المكررة وكلمات النهاية)
         content = content.replace(/\(本章完\)/g, '')
                         .replace(/\n\s*\n/g, '\n\n')
                         .trim();
 
-        // 3. استخراج رابط الفصل التالي (للسحب المستمر مستقبلاً)
         const nextChapterUrl = $('.page1 a').last().attr('href');
 
-        console.log('--- نتيجة السحب التجريبي ---');
-        console.log('العنوان:', title);
-        console.log('رابط الفصل التالي:', nextChapterUrl);
-        console.log('مقتطف من المحتوى:', content.substring(0, 200) + '...');
-        console.log('-----------------------------');
+        const result = {
+            success: true,
+            title,
+            nextChapterUrl,
+            contentSnippet: content.substring(0, 300) + '...'
+        };
 
-        return { title, content, nextChapterUrl };
+        console.log('✅ تم السحب بنجاح!');
+        return result;
 
     } catch (error) {
-        console.error('حدث خطأ أثناء السحب:', error.message);
+        console.error('❌ حدث خطأ أثناء السحب:', error.message);
+        return {
+            success: false,
+            error: error.message,
+            tip: 'قد يكون الموقع قد حظر عنوان IP الخادم، جرب التشغيل محلياً أو استخدام Proxy.'
+        };
     }
 }
 
-// تشغيل التجربة
-scrapeChapter();
-
-// إعداد خادم بسيط لكي يعمل على Railway ولا يتوقف
+// إعداد السيرفر
 const http = require('http');
 const server = http.createServer(async (req, res) => {
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    
     if (req.url === '/test') {
         const data = await scrapeChapter();
-        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.writeHead(200);
         res.end(JSON.stringify(data, null, 2));
     } else {
-        res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
-        res.end('خادم سحب الروايات يعمل. اذهب إلى /test لرؤية التجربة.');
+        res.writeHead(200);
+        res.end(JSON.stringify({ message: 'خادم السحب يعمل. اذهب إلى /test' }));
     }
 });
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 8080;
 server.listen(PORT, () => {
     console.log(`Server is running on port ${PORT}`);
 });
