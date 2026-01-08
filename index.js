@@ -1,78 +1,112 @@
-const puppeteer = require('puppeteer');
+const axios = require('axios');
 const cheerio = require('cheerio');
+const iconv = require('iconv-lite');
 
+/**
+ * إعدادات المحاكاة المتقدمة لجعل الطلب يبدو بشرياً قدر الإمكان
+ * دون استهلاك موارد الذاكرة (بدون متصفح).
+ */
 const targetUrl = 'https://www.69shuba.com/txt/87906/39867326';
 
-async function scrapeWithBrowser() {
-    let browser;
+async function scrapeLightweight() {
     try {
-        console.log(`[LOG] جاري تشغيل متصفح حقيقي لجلب البيانات...`);
+        console.log(`[LOG] محاولة سحب "خفيفة" وذكية للفصل...`);
 
-        // تشغيل المتصفح مع إعدادات لتجاوز بيئة Docker في Railway
-        browser = await puppeteer.launch({
-            headless: "new",
-            args: [
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-blink-features=AutomationControlled' // إخفاء حقيقة أنه بوت
-            ]
+        // إنشاء جلسة مخصصة (Custom Session)
+        const instance = axios.create({
+            timeout: 20000,
+            responseType: 'arraybuffer', // ضروري للتعامل مع ترميز GBK الصيني
+            headers: {
+                // ترتيب الـ Headers مهم جداً لبعض أنظمة الحماية
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+                'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+                'Sec-Fetch-Dest': 'document',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-Site': 'none',
+                'Sec-Fetch-User': '?1',
+                'Cache-Control': 'max-age=0',
+                // إرسال كوكي أساسي يوحي بأننا قمنا بزيارة الموقع سابقاً
+                'Cookie': 'zh_chosen=s; bcolor=; font=; size=; fontcolor=; width=;'
+            }
         });
 
-        const page = await browser.newPage();
+        // تنفيذ الطلب
+        const response = await instance.get(targetUrl);
 
-        // إعداد User-Agent بشري
-        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+        // تحويل النص من ترميز GBK الصيني إلى UTF-8
+        const decodedHtml = iconv.decode(response.data, 'gbk');
+        const $ = cheerio.load(decodedHtml);
 
-        // الذهاب للرابط والانتظار حتى يستقر الشبكة
-        await page.goto(targetUrl, { waitUntil: 'networkidle2', timeout: 60000 });
-
-        // الحصول على محتوى الصفحة بعد تشغيل السكريبتات
-        const html = await page.content();
-        const $ = cheerio.load(html);
-
-        // التحقق من النجاح
+        // التحقق من الحظر (403 أو صفحة حماية)
         const title = $('h1').last().text().trim();
-        if (!title || html.includes('403 Forbidden')) {
-            throw new Error('الموقع لا يزال يحجب الوصول حتى مع المتصفح الحقيقي.');
+        if (!title || decodedHtml.includes('Cloudflare') || decodedHtml.includes('403 Forbidden')) {
+            throw new Error('تم الحظر (403). الموقع يكتشف أنك تستخدم خادم Cloud.');
         }
 
-        // تنظيف المحتوى
+        // تنظيف المحتوى (إزالة الإعلانات والنصوص المزعجة)
         $('.txtnav script, .txtnav .contentadv, .txtnav .txtinfo, .txtnav h1').remove();
+        
         let content = $('.txtnav').text();
-        content = content.replace(/\(本章完\)/g, '').replace(/\n\s*\n/g, '\n\n').trim();
+        
+        // معالجة النصوص الصينية والمسافات
+        content = content
+            .replace(/\t/g, '')
+            .replace(/\(本章完\)/g, '')
+            .replace(/\n\s*\n/g, '\n\n')
+            .trim();
 
-        const nextUrl = $('.page1 a').last().attr('href');
+        const nextUrl = $('.page1 a:contains("下一章")').attr('href') || 
+                        $('.page1 a').last().attr('href');
 
-        console.log(`[SUCCESS] تم السحب بواسطة المتصفح بنجاح! العنوان: ${title}`);
+        console.log(`[SUCCESS] تم جلب الفصل بنجاح: ${title}`);
         
         return {
             status: 'success',
-            title,
-            content: content.substring(0, 500) + "...", // نرسل جزءاً فقط للتجربة
-            nextUrl
+            data: {
+                title,
+                nextChapter: nextUrl,
+                content: content.substring(0, 500) + "..." // عينة من النص
+            }
         };
 
     } catch (error) {
-        console.error(`[ERROR] فشل المتصفح: ${error.message}`);
-        return { status: 'error', message: error.message };
-    } finally {
-        if (browser) await browser.close();
+        let errorMessage = error.message;
+        if (error.response && error.response.status === 403) {
+            errorMessage = "خطأ 403: عنوان الـ IP الخاص بالخادم محظور تماماً من قبل الموقع.";
+        }
+        
+        console.error(`[ERROR] ${errorMessage}`);
+        return {
+            status: 'error',
+            message: errorMessage
+        };
     }
 }
 
-// السيرفر
+// إعداد سيرفر بسيط للاستجابة
 const http = require('http');
 const server = http.createServer(async (req, res) => {
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
+
     if (req.url === '/test') {
-        const data = await scrapeWithBrowser();
-        res.end(JSON.stringify(data, null, 2));
+        const result = await scrapeLightweight();
+        res.writeHead(200);
+        res.end(JSON.stringify(result, null, 2));
     } else {
-        res.end(JSON.stringify({ message: 'Headless Browser Scraper is ready. Go to /test' }));
+        res.writeHead(200);
+        res.end(JSON.stringify({ 
+            status: 'Lightweight Scraper Active',
+            endpoint: '/test',
+            note: 'This mode saves your Railway credits.'
+        }));
     }
 });
 
 const PORT = process.env.PORT || 8080;
 server.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
+    console.log(`Server is running on port ${PORT}`);
 });
