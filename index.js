@@ -2,111 +2,80 @@ const axios = require('axios');
 const cheerio = require('cheerio');
 const iconv = require('iconv-lite');
 
-/**
- * إعدادات المحاكاة المتقدمة لجعل الطلب يبدو بشرياً قدر الإمكان
- * دون استهلاك موارد الذاكرة (بدون متصفح).
- */
 const targetUrl = 'https://www.69shuba.com/txt/87906/39867326';
 
-async function scrapeLightweight() {
+async function scrapeWithRealCookies() {
     try {
-        console.log(`[LOG] محاولة سحب "خفيفة" وذكية للفصل...`);
+        console.log(`[LOG] محاولة السحب باستخدام كوكيز حقيقي مستخرج من الصور...`);
 
-        // إنشاء جلسة مخصصة (Custom Session)
+        // ملاحظة: قمت بنسخ القيم الظاهرة في لقطات الشاشة الخاصة بك
+        const cookieString = [
+            'zh_choose=s',
+            'shuba=10814-11633-20856-3178',
+            'jieqiHistory=87906-39867326-%25u7B2C1%25u7AE0%2520%25u674E%25u6155%25u751F-1767886344',
+            '_ga=GA1.1.2076534855.1767884557',
+            '_sharedID=3801fe8a-709a-49e0-a6c8-dde12225ee31'
+        ].join('; ');
+
         const instance = axios.create({
-            timeout: 20000,
-            responseType: 'arraybuffer', // ضروري للتعامل مع ترميز GBK الصيني
+            timeout: 15000,
+            responseType: 'arraybuffer',
             headers: {
-                // ترتيب الـ Headers مهم جداً لبعض أنظمة الحماية
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-                'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-                'Accept-Encoding': 'gzip, deflate, br',
-                'Connection': 'keep-alive',
-                'Upgrade-Insecure-Requests': '1',
-                'Sec-Fetch-Dest': 'document',
-                'Sec-Fetch-Mode': 'navigate',
-                'Sec-Fetch-Site': 'none',
-                'Sec-Fetch-User': '?1',
-                'Cache-Control': 'max-age=0',
-                // إرسال كوكي أساسي يوحي بأننا قمنا بزيارة الموقع سابقاً
-                'Cookie': 'zh_chosen=s; bcolor=; font=; size=; fontcolor=; width=;'
+                'Cookie': cookieString, // الكوكيز الحقيقي الخاص بك
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+                'Accept-Language': 'zh-CN,zh;q=0.9',
+                'Referer': 'https://www.69shuba.com/',
+                'Cache-Control': 'no-cache',
+                'Pragma': 'no-cache'
             }
         });
 
-        // تنفيذ الطلب
         const response = await instance.get(targetUrl);
-
-        // تحويل النص من ترميز GBK الصيني إلى UTF-8
         const decodedHtml = iconv.decode(response.data, 'gbk');
         const $ = cheerio.load(decodedHtml);
 
-        // التحقق من الحظر (403 أو صفحة حماية)
+        // التحقق من النجاح
         const title = $('h1').last().text().trim();
-        if (!title || decodedHtml.includes('Cloudflare') || decodedHtml.includes('403 Forbidden')) {
-            throw new Error('تم الحظر (403). الموقع يكتشف أنك تستخدم خادم Cloud.');
+        
+        if (!title || decodedHtml.includes('403 Forbidden')) {
+            throw new Error('حتى مع الكوكيز الحقيقي، الموقع يرفض الـ IP الخاص بالخادم.');
         }
 
-        // تنظيف المحتوى (إزالة الإعلانات والنصوص المزعجة)
+        // تنظيف المحتوى
         $('.txtnav script, .txtnav .contentadv, .txtnav .txtinfo, .txtnav h1').remove();
-        
         let content = $('.txtnav').text();
-        
-        // معالجة النصوص الصينية والمسافات
-        content = content
-            .replace(/\t/g, '')
-            .replace(/\(本章完\)/g, '')
-            .replace(/\n\s*\n/g, '\n\n')
-            .trim();
+        content = content.replace(/\(本章完\)/g, '').replace(/\n\s*\n/g, '\n\n').trim();
 
-        const nextUrl = $('.page1 a:contains("下一章")').attr('href') || 
-                        $('.page1 a').last().attr('href');
+        const nextUrl = $('.page1 a:contains("下一章")').attr('href') || $('.page1 a').last().attr('href');
 
-        console.log(`[SUCCESS] تم جلب الفصل بنجاح: ${title}`);
+        console.log(`[SUCCESS] نجحت الخطة! الفصل المجلوب: ${title}`);
         
         return {
             status: 'success',
-            data: {
-                title,
-                nextChapter: nextUrl,
-                content: content.substring(0, 500) + "..." // عينة من النص
-            }
+            title,
+            nextChapter: nextUrl,
+            content: content.substring(0, 500) + "..."
         };
 
     } catch (error) {
-        let errorMessage = error.message;
-        if (error.response && error.response.status === 403) {
-            errorMessage = "خطأ 403: عنوان الـ IP الخاص بالخادم محظور تماماً من قبل الموقع.";
-        }
-        
-        console.error(`[ERROR] ${errorMessage}`);
-        return {
-            status: 'error',
-            message: errorMessage
-        };
+        console.error(`[ERROR] ${error.message}`);
+        return { status: 'error', message: error.message };
     }
 }
 
-// إعداد سيرفر بسيط للاستجابة
 const http = require('http');
 const server = http.createServer(async (req, res) => {
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
-
     if (req.url === '/test') {
-        const result = await scrapeLightweight();
-        res.writeHead(200);
+        const result = await scrapeWithRealCookies();
         res.end(JSON.stringify(result, null, 2));
     } else {
-        res.writeHead(200);
-        res.end(JSON.stringify({ 
-            status: 'Lightweight Scraper Active',
-            endpoint: '/test',
-            note: 'This mode saves your Railway credits.'
-        }));
+        res.end(JSON.stringify({ message: 'Scraper with Real Cookies is Online', endpoint: '/test' }));
     }
 });
 
 const PORT = process.env.PORT || 8080;
 server.listen(PORT, () => {
-    console.log(`Server is running on port ${PORT}`);
+    console.log(`Server started on port ${PORT}`);
 });
