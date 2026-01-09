@@ -80,7 +80,7 @@ else:
     print("⚠️ FIREBASE_SERVICE_ACCOUNT not found in env vars")
 
 # ==========================================
-# أدوات السحب (Scraper Tools)
+# أدوات السحب (Scraper Tools) - تم التعديل هنا لضمان السحب
 # ==========================================
 
 def get_headers():
@@ -121,26 +121,31 @@ def fetch_novel_metadata_html(url):
             
         soup = BeautifulSoup(response.content, 'html.parser')
         
-        # 1. Title
+        # 1. Title - البحث في h1 مباشرة كما في الكود الناجح
         title_tag = soup.find('h1')
         title = title_tag.get_text(strip=True) if title_tag else "Unknown Title"
         
-        # 2. Cover
+        # 2. Cover - محاولة جلب الغلاف من تاق og:image لضمان النجاح
         cover_url = ""
-        img_div = soup.find('div', class_='v-image__image--cover')
-        if img_div and img_div.has_attr('style'):
-            cover_url = extract_background_image(img_div['style'])
+        og_image = soup.find("meta", property="og:image")
+        if og_image:
+            cover_url = og_image["content"]
+        else:
+            img_div = soup.find('div', class_='v-image__image--cover')
+            if img_div and img_div.has_attr('style'):
+                cover_url = extract_background_image(img_div['style'])
             
         # 3. Description
         desc_div = soup.find(class_='text-pre-line') or soup.find('div', class_='v-card__text')
         description = desc_div.get_text(strip=True) if desc_div else ""
         
         # 4. Status & Category
-        chips = soup.find_all(class_='v-chip__content')
         status = "مستمرة"
         tags = []
         category = "عام"
         
+        # البحث عن الكلمات المفتاحية في الصفحة للحالة والتصنيف
+        chips = soup.find_all(class_='v-chip__content')
         for chip in chips:
             text = chip.get_text(strip=True)
             if text in ['مكتملة', 'متوقفة', 'مستمرة']:
@@ -151,16 +156,21 @@ def fetch_novel_metadata_html(url):
         if tags:
             category = tags[0]
 
-        # 5. Total Chapters
+        # 5. Total Chapters - محاولة جلب الرقم من النص العام إذا فشلت التابات
         total_chapters = 0
-        tabs = soup.find_all(class_='v-tab')
-        for tab in tabs:
-            tab_text = tab.get_text(strip=True)
-            if "الفصول" in tab_text:
-                match = re.search(r'\((\d+)\)', tab_text)
-                if match:
-                    total_chapters = int(match.group(1))
-                    break
+        all_text = soup.get_text()
+        chapter_match = re.search(r'الفصول\s*\((\d+)\)', all_text)
+        if chapter_match:
+            total_chapters = int(chapter_match.group(1))
+        else:
+            tabs = soup.find_all(class_='v-tab')
+            for tab in tabs:
+                tab_text = tab.get_text(strip=True)
+                if "الفصول" in tab_text:
+                    match = re.search(r'\((\d+)\)', tab_text)
+                    if match:
+                        total_chapters = int(match.group(1))
+                        break
         
         return {
             'title': title,
@@ -177,7 +187,7 @@ def fetch_novel_metadata_html(url):
         return None
 
 def scrape_chapter_content_html(novel_url, chapter_num):
-    """سحب نص الفصل مع تجربة كلاسات متعددة"""
+    """سحب نص الفصل باستخدام استهداف الوسوم المباشرة (المنطق الناجح)"""
     url = f"{novel_url.rstrip('/')}/{chapter_num}"
     try:
         response = requests.get(url, headers=get_headers(), timeout=10)
@@ -186,31 +196,29 @@ def scrape_chapter_content_html(novel_url, chapter_num):
             
         soup = BeautifulSoup(response.content, 'html.parser')
         
-        # محاولة إيجاد المحتوى بعدة طرق لضمان عدم الفشل
-        content_div = soup.find('div', class_='pre-formatted') or \
-                      soup.find('div', class_='v-card__text') or \
-                      soup.find('div', class_='chapter-content') or \
-                      soup.find('div', id='chapter-article')
-            
-        if content_div:
-            # تنظيف المحتوى من الأوسمة غير الضرورية
-            for extra in content_div.find_all(['script', 'style', 'ins']):
-                extra.decompose()
-                
-            paragraphs = content_div.find_all(['p', 'div'])
-            if paragraphs:
-                text_content = "\n\n".join([p.get_text(strip=True) for p in paragraphs if p.get_text(strip=True)])
-            else:
-                text_content = content_div.get_text(separator="\n\n", strip=True)
-            
-            # فلتر للتأكد من وجود نص حقيقي
-            if len(text_content.strip()) < 50:
-                return None, None
+        # الطريقة الناجحة: البحث عن جميع وسوم p التي تحتوي على نص حقيقي
+        paragraphs = soup.find_all('p')
+        # تنظيف وفلترة النصوص (استبعاد الإعلانات والجمل القصيرة جداً)
+        clean_paragraphs = [p.get_text(strip=True) for p in paragraphs if len(p.get_text(strip=True)) > 20]
+        
+        if clean_paragraphs:
+            text_content = "\n\n".join(clean_paragraphs)
         else:
+            # محاولة احتياطية: إذا لم يجد p، يبحث في الـ div الرئيسي للمحتوى
+            content_div = soup.find('div', class_='pre-formatted') or soup.find('div', class_='v-card__text')
+            if content_div:
+                text_content = content_div.get_text(separator="\n\n", strip=True)
+            else:
+                return None, None
+            
+        # التأكد من وجود نص حقيقي
+        if len(text_content.strip()) < 50:
             return None, None
 
+        # استخراج العنوان من v-card__subtitle أو h1
         title_tag = soup.find(class_='v-card__subtitle') or soup.find('h1')
         title = title_tag.get_text(strip=True) if title_tag else f"الفصل {chapter_num}"
+        # إزالة أي أرقام زائدة من بداية العنوان
         title = re.sub(r'^\d+\s*-\s*', '', title)
 
         return title, text_content
@@ -231,35 +239,39 @@ def background_worker(url, admin_email, author_name):
 
     print(f"📖 Found Novel: {metadata['title']} ({metadata['total_chapters']} Chapters)")
 
-    # 2. إنشاء أو تحديث الرواية في MongoDB فوراً لكي تظهر في التطبيق
+    # 2. إنشاء أو تحديث الرواية في MongoDB
     novel_id = None
     if novels_collection is not None:
-        existing_novel = novels_collection.find_one({'title': metadata['title'], 'authorEmail': admin_email})
-        
-        novel_doc = {
-            'title': metadata['title'],
-            'description': metadata['description'],
-            'cover': metadata['cover'],
-            'author': author_name,
-            'authorEmail': admin_email,
-            'category': metadata['category'],
-            'tags': metadata['tags'],
-            'status': metadata['status'],
-            'sourceUrl': url,
-            'lastChapterUpdate': datetime.now()
-        }
+        try:
+            existing_novel = novels_collection.find_one({'title': metadata['title'], 'authorEmail': admin_email})
+            
+            novel_doc = {
+                'title': metadata['title'],
+                'description': metadata['description'],
+                'cover': metadata['cover'],
+                'author': author_name,
+                'authorEmail': admin_email,
+                'category': metadata['category'],
+                'tags': metadata['tags'],
+                'status': metadata['status'],
+                'sourceUrl': url,
+                'lastChapterUpdate': datetime.now()
+            }
 
-        if existing_novel:
-            novel_id = existing_novel['_id']
-            novels_collection.update_one({'_id': novel_id}, {'$set': novel_doc})
-            print(f"🔄 Novel updated in MongoDB: {novel_id}")
-        else:
-            novel_doc['createdAt'] = datetime.now()
-            novel_doc['chapters'] = []
-            novel_doc['views'] = 0
-            result = novels_collection.insert_one(novel_doc)
-            novel_id = result.inserted_id
-            print(f"🆕 New novel created in MongoDB: {novel_id}")
+            if existing_novel:
+                novel_id = existing_novel['_id']
+                novels_collection.update_one({'_id': novel_id}, {'$set': novel_doc})
+                print(f"🔄 Novel updated in MongoDB: {novel_id}")
+            else:
+                novel_doc['createdAt'] = datetime.now()
+                novel_doc['chapters'] = []
+                novel_doc['views'] = 0
+                result = novels_collection.insert_one(novel_doc)
+                novel_id = result.inserted_id
+                print(f"🆕 New novel created in MongoDB: {novel_id}")
+        except Exception as e:
+            print(f"❌ MongoDB operation error: {e}")
+            return
     else:
         print("❌ MongoDB not connected, cannot proceed.")
         return
@@ -270,7 +282,7 @@ def background_worker(url, admin_email, author_name):
         print("⚠️ No chapters count found, trying first 100 blind...")
         total = 100
 
-    # جلب قائمة الفصول الموجودة حالياً
+    # جلب قائمة الفصول الموجودة حالياً لتجنب التكرار
     current_novel = novels_collection.find_one({'_id': novel_id})
     existing_numbers = [c['number'] for c in current_novel.get('chapters', [])] if current_novel else []
 
@@ -306,7 +318,7 @@ def background_worker(url, admin_email, author_name):
                     )
                 
                 print(f"✅ Chapter {num} uploaded successfully.")
-                time.sleep(1.5)
+                time.sleep(1.2) # تأخير بسيط لتجنب الحظر على Railway
                 
             except Exception as e:
                 print(f"❌ DB Save Error Ch {num}: {e}")
@@ -321,7 +333,7 @@ def background_worker(url, admin_email, author_name):
 
 @app.route('/', methods=['GET'])
 def health_check():
-    return "ZEUS HTML Scraper Service is Running ⚡ v2.1", 200
+    return "ZEUS HTML Scraper Service is Running ⚡ v2.2 (Enhanced Logic)", 200
 
 @app.route('/scrape', methods=['POST'])
 def trigger_scrape():
@@ -330,6 +342,9 @@ def trigger_scrape():
         return jsonify({'message': 'Unauthorized'}), 401
 
     data = request.json
+    if not data:
+        return jsonify({'message': 'No data provided'}), 400
+        
     url = data.get('url')
     admin_email = data.get('adminEmail')
     author_name = data.get('authorName', 'ZEUS Bot')
@@ -343,7 +358,7 @@ def trigger_scrape():
     thread.start()
 
     return jsonify({
-        'message': 'تم بدء العملية. الرواية ستظهر في تطبيقك خلال ثوانٍ ويبدأ سحب الفصول.',
+        'message': 'تم بدء العملية بنجاح. المحرك يعمل الآن على سحب البيانات وحفظها في قواعد بياناتك.',
         'status': 'started'
     }), 200
 
