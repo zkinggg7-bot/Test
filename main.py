@@ -11,6 +11,7 @@ from firebase_admin import credentials, firestore
 from pymongo import MongoClient
 import certifi
 from datetime import datetime
+import re
 
 # ==========================================
 # إعدادات التطبيق
@@ -18,7 +19,7 @@ from datetime import datetime
 app = Flask(__name__)
 CORS(app)
 
-# مفتاح سري لحماية الرابط (يجب أن يطابق الموجود في تطبيق React Native)
+# مفتاح سري لحماية الرابط
 API_SECRET = os.environ.get('API_SECRET', 'Zeusndndjddnejdjdjdejekk29393838msmskxcm9239484jdndjdnddjj99292938338zeuslojdnejxxmejj82283849')
 
 # ==========================================
@@ -29,9 +30,7 @@ API_SECRET = os.environ.get('API_SECRET', 'Zeusndndjddnejdjdjdejekk29393838msmsk
 MONGO_URI = os.environ.get('MONGODB_URI')
 if MONGO_URI:
     try:
-        # إضافة tlsCAFile لضمان الاتصال الآمن من Railway
         mongo_client = MongoClient(MONGO_URI, tlsCAFile=certifi.where())
-        # تحديد قاعدة بيانات افتراضية باسم zeus لتجنب خطأ "No default database defined"
         mongo_db = mongo_client['zeus'] 
         novels_collection = mongo_db['novels']
         print("✅ Connected to MongoDB")
@@ -44,19 +43,59 @@ else:
 FIREBASE_KEY = os.environ.get('FIREBASE_SERVICE_ACCOUNT')
 if FIREBASE_KEY:
     try:
-        # تنظيف النص وتحويله إلى قاموس JSON
-        cred_dict = json.loads(FIREBASE_KEY.strip())
+        # تنظيف النص بشكل شامل
+        firebase_key_cleaned = FIREBASE_KEY.strip()
         
-        # إصلاح مشكلة الـ Private Key (السطور الجديدة) التي تسبب خطأ PEM file
+        # إزالة أي BOM أو أحرف خفية
+        firebase_key_cleaned = firebase_key_cleaned.encode('utf-8').decode('utf-8-sig')
+        
+        # تحويل إلى JSON
+        cred_dict = json.loads(firebase_key_cleaned)
+        
+        # إصلاح المفتاح الخاص بشكل دقيق
         if 'private_key' in cred_dict:
-            cred_dict['private_key'] = cred_dict['private_key'].replace('\\n', '\n').strip()
+            private_key = cred_dict['private_key']
             
+            # استبدال \\n بسطور حقيقية
+            private_key = private_key.replace('\\n', '\n')
+            
+            # إزالة المسافات والتابات الزائدة من كل سطر
+            lines = private_key.split('\n')
+            cleaned_lines = []
+            for line in lines:
+                # الحفاظ على BEGIN/END كما هي
+                if '-----BEGIN' in line or '-----END' in line:
+                    cleaned_lines.append(line.strip())
+                else:
+                    # إزالة جميع المسافات من سطور Base64
+                    cleaned_line = line.strip().replace(' ', '').replace('\t', '')
+                    if cleaned_line:  # تجاهل الأسطر الفارغة
+                        cleaned_lines.append(cleaned_line)
+            
+            # إعادة بناء المفتاح
+            cred_dict['private_key'] = '\n'.join(cleaned_lines)
+            
+            # التحقق من صحة التنسيق
+            if not cred_dict['private_key'].startswith('-----BEGIN PRIVATE KEY-----'):
+                raise ValueError("Invalid private key format: missing BEGIN header")
+            if not cred_dict['private_key'].endswith('-----END PRIVATE KEY-----'):
+                raise ValueError("Invalid private key format: missing END footer")
+        
+        # تهيئة Firebase
         cred = credentials.Certificate(cred_dict)
         firebase_admin.initialize_app(cred)
         firestore_db = firestore.client()
         print("✅ Connected to Firebase Firestore")
+        
+    except json.JSONDecodeError as e:
+        print(f"❌ Firebase JSON Parse Error: {e}")
+        print(f"First 100 chars of FIREBASE_KEY: {FIREBASE_KEY[:100]}")
+    except ValueError as e:
+        print(f"❌ Firebase Key Format Error: {e}")
     except Exception as e:
         print(f"❌ Firebase Connection Error: {e}")
+        import traceback
+        print(traceback.format_exc())
 else:
     print("⚠️ FIREBASE_SERVICE_ACCOUNT not found in env vars")
 
@@ -286,6 +325,5 @@ def trigger_scrape():
     }), 200
 
 if __name__ == "__main__":
-    # تشغيل السيرفر
     port = int(os.environ.get('PORT', 8080))
     app.run(host='0.0.0.0', port=port)
