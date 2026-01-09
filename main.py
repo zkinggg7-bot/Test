@@ -1,3 +1,4 @@
+
 import os
 import json
 import time
@@ -213,6 +214,32 @@ def scrape_chapter_content_html(novel_url, chapter_num):
         print(f"Error scraping chapter {chapter_num}: {e}")
         return None, None
 
+def check_existing_chapters(title):
+    """التحقق من الفصول الموجودة في الباك إند"""
+    try:
+        endpoint = f"{NODE_BACKEND_URL}/api/scraper/check-chapters"
+        headers = {
+            'Content-Type': 'application/json',
+            'Authorization': API_SECRET,
+            'x-api-secret': API_SECRET
+        }
+        response = requests.post(endpoint, json={'title': title}, headers=headers, timeout=30)
+        
+        if response.status_code == 200:
+            data = response.json()
+            if data.get('exists'):
+                print(f"✅ Novel exists! Found {len(data['chapters'])} chapters.")
+                return data['chapters'] # returns list of integers
+            else:
+                print("ℹ️ Novel does not exist in backend.")
+                return []
+        else:
+            print(f"⚠️ Failed to check existence: {response.text}")
+            return []
+    except Exception as e:
+        print(f"❌ Error checking existence: {e}")
+        return []
+
 def send_data_to_backend(payload):
     """إرسال البيانات إلى الخادم الرئيسي Node.js"""
     try:
@@ -235,11 +262,11 @@ def send_data_to_backend(payload):
         return False
 
 # ==========================================
-# دالة الخلفية المعدلة (تدعم إكمال النواقص)
+# دالة الخلفية المعدلة (تدعم إكمال النواقص الذكي)
 # ==========================================
 def background_worker(url, admin_email, author_name, start_from=1, update_info=True):
     """الوظيفة التي تعمل في الخلفية"""
-    print(f"🚀 Starting Scraper for: {url} | Start Chapter: {start_from} | Update Info: {update_info}")
+    print(f"🚀 Starting Scraper for: {url}")
     
     # 1. جلب البيانات الوصفية للرواية
     metadata = fetch_novel_metadata_html(url)
@@ -250,31 +277,50 @@ def background_worker(url, admin_email, author_name, start_from=1, update_info=T
 
     print(f"📖 Found Novel: {metadata['title']} ({metadata['total_chapters']} Chapters)")
 
-    # 2. إرسال البيانات الوصفية (Initial Payload)
-    # نرسلها فقط إذا كنا نبدأ من البداية ونريد التحديث الكامل.
-    # إذا كنا نكمل النواقص، نتخطى هذه الخطوة لمنع الكتابة فوق الصورة/الوصف القديم في الباك اند.
-    if start_from == 1 and update_info:
+    # 2. التحقق من الفصول الموجودة (المصافحة الذكية)
+    existing_chapters = check_existing_chapters(metadata['title'])
+    
+    # إذا كانت الرواية موجودة، نقوم بتعطيل تحديث الميتاداتا تلقائياً للحفاظ على الغلاف والوصف
+    # إلا إذا كان المستخدم قد طلب التحديث صراحة (وهذا غير مدعوم في الواجهة الحالية لذا نعتمد على الوجود)
+    skip_metadata_update = False
+    if len(existing_chapters) > 0:
+        print("ℹ️ Existing chapters found. Enabling 'Gap Scraping' mode.")
+        print("ℹ️ Metadata update (Cover/Desc) will be SKIPPED to preserve existing data.")
+        skip_metadata_update = True
+        
+        # إذا كانت القائمة موجودة، لا داعي لإرسال الـ Initial Payload
+    else:
+        # إرسال البيانات الوصفية (Initial Payload) فقط إذا كانت رواية جديدة
         init_payload = {
             'adminEmail': admin_email,
             'novelData': metadata,
-            'chapters': [] 
+            'chapters': [],
+            'skipMetadataUpdate': False
         }
         if not send_data_to_backend(init_payload):
             print("❌ Stopping execution because initial handshake failed.")
             return
-    else:
-        print(f"ℹ️ Skipping initial metadata push (Start From: {start_from}).")
 
     # 3. حلقة سحب الفصول وإرسالها على دفعات (Batches)
     total = metadata['total_chapters']
     if total == 0:
-        total = 2000 # احتياط
+        total = 3000 # احتياط
         
     batch_size = 5 
     current_batch = []
+    skipped_count = 0
 
-    # نبدأ الحلقة من start_from بدلاً من 1
+    # نبدأ الحلقة
     for num in range(start_from, total + 1):
+        
+        # 🔥🔥🔥 SMART SKIP LOGIC 🔥🔥🔥
+        if num in existing_chapters:
+            skipped_count += 1
+            if skipped_count % 50 == 0:
+                print(f"⏩ Skipped {skipped_count} existing chapters so far...")
+            continue
+        
+        # إذا وصلنا هنا، فالفصل غير موجود، نقوم بسحبه
         chap_title, content = scrape_chapter_content_html(url, num)
         
         if content:
@@ -284,24 +330,24 @@ def background_worker(url, admin_email, author_name, start_from=1, update_info=T
                 'content': content
             }
             current_batch.append(chapter_data)
-            print(f"📄 Scraped Chapter {num}")
+            print(f"📄 Scraped New Chapter {num}")
         else:
             print(f"⚠️ Failed to scrape content for Ch {num}")
 
-        if len(current_batch) >= batch_size or num == total:
-            if current_batch:
-                print(f"📤 Sending batch of {len(current_batch)} chapters...")
-                payload = {
-                    'adminEmail': admin_email,
-                    'novelData': metadata, 
-                    'chapters': current_batch,
-                    'isUpdate': (start_from > 1) # علامة للباك اند أن هذا تحديث
-                }
-                send_data_to_backend(payload)
-                current_batch = [] 
-                time.sleep(1) 
+        # إرسال الدفعة عندما تكتمل
+        if len(current_batch) >= batch_size or (num == total and len(current_batch) > 0):
+            print(f"📤 Sending batch of {len(current_batch)} NEW chapters...")
+            payload = {
+                'adminEmail': admin_email,
+                'novelData': metadata, 
+                'chapters': current_batch,
+                'skipMetadataUpdate': skip_metadata_update # إخبار الباك إند بعدم تحديث الغلاف
+            }
+            send_data_to_backend(payload)
+            current_batch = [] 
+            time.sleep(1) 
 
-    print("✨ Scraping Task Completed Successfully!")
+    print(f"✨ Scraping Task Completed! Skipped {skipped_count} existing chapters.")
 
 # ==========================================
 # نقاط النهاية (Endpoints)
@@ -309,7 +355,7 @@ def background_worker(url, admin_email, author_name, start_from=1, update_info=T
 
 @app.route('/', methods=['GET'])
 def health_check():
-    return "ZEUS Scraper Service (Relay Mode - Update Supported) is Running ⚡", 200
+    return "ZEUS Scraper Service (Smart Mode Active 🧠) is Running ⚡", 200
 
 @app.route('/scrape', methods=['POST'])
 def trigger_scrape():
@@ -325,24 +371,20 @@ def trigger_scrape():
     admin_email = data.get('adminEmail')
     author_name = data.get('authorName', 'ZEUS Bot')
     
-    # استقبال خيارات التحديث وإكمال النواقص
-    # الافتراضي يبدأ من 1 ويحدث كل شيء
     start_from = int(data.get('startFrom', 1))
-    
-    # إذا بدأنا من 1، فالافتراضي تحديث المعلومات، غير ذلك الافتراضي عدم التحديث
-    default_update = True if start_from == 1 else False
-    update_info = data.get('updateInfo', default_update)
+    # update_info لم يعد له أهمية كبيرة لأننا نعتمد على الفحص الذكي، لكن نتركه
+    update_info = data.get('updateInfo', True)
 
     if not url or 'rewayat.club' not in url:
         return jsonify({'message': 'Invalid URL. Must be from rewayat.club'}), 400
 
-    # بدء العمل في الخلفية مع المعاملات الجديدة
+    # بدء العمل في الخلفية
     thread = threading.Thread(target=background_worker, args=(url, admin_email, author_name, start_from, update_info))
     thread.daemon = True 
     thread.start()
 
     return jsonify({
-        'message': f'تم بدء العملية من الفصل {start_from}.',
+        'message': f'تم بدء الفحص الذكي والاستيراد.',
         'status': 'started'
     }), 200
 
