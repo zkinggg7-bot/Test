@@ -26,12 +26,12 @@ API_SECRET = os.environ.get('API_SECRET', 'Zeusndndjddnejdjdjdejekk29393838msmsk
 # ==========================================
 
 # 1. MongoDB Setup
-# تم التعديل ليطابق الاسم في الصورة: MONGODB_URI
 MONGO_URI = os.environ.get('MONGODB_URI')
 if MONGO_URI:
     try:
+        # إضافة tlsCAFile لضمان الاتصال الآمن من Railway
         mongo_client = MongoClient(MONGO_URI, tlsCAFile=certifi.where())
-        # تحديد قاعدة بيانات افتراضية باسم zeus لضمان عمل العمليات
+        # تحديد قاعدة بيانات افتراضية باسم zeus لتجنب خطأ "No default database defined"
         mongo_db = mongo_client['zeus'] 
         novels_collection = mongo_db['novels']
         print("✅ Connected to MongoDB")
@@ -41,16 +41,15 @@ else:
     print("⚠️ MONGODB_URI not found in env vars")
 
 # 2. Firebase Setup
-# تم التعديل ليطابق الاسم في الصورة: FIREBASE_SERVICE_ACCOUNT
 FIREBASE_KEY = os.environ.get('FIREBASE_SERVICE_ACCOUNT')
 if FIREBASE_KEY:
     try:
-        # إذا كان المفتاح نص JSON (كما في Railway Variables)
-        cred_dict = json.loads(FIREBASE_KEY)
+        # تنظيف النص وتحويله إلى قاموس JSON
+        cred_dict = json.loads(FIREBASE_KEY.strip())
         
-        # معالجة المفتاح الخاص لضمان قراءة السطور الجديدة بشكل صحيح في بيئة الإنتاج
+        # إصلاح مشكلة الـ Private Key (السطور الجديدة) التي تسبب خطأ PEM file
         if 'private_key' in cred_dict:
-            cred_dict['private_key'] = cred_dict['private_key'].replace('\\n', '\n')
+            cred_dict['private_key'] = cred_dict['private_key'].replace('\\n', '\n').strip()
             
         cred = credentials.Certificate(cred_dict)
         firebase_admin.initialize_app(cred)
@@ -67,8 +66,6 @@ else:
 
 def get_slug_from_url(url):
     """استخراج المعرف الفريد للرواية من الرابط"""
-    # Example: https://rewayat.club/novel/the-beginning-after-the-end/
-    # Slug: the-beginning-after-the-end
     parts = url.split('/novel/')
     if len(parts) > 1:
         return parts[1].strip('/').split('/')[0]
@@ -102,7 +99,6 @@ def fetch_all_chapters_list(slug):
     headers = {'User-Agent': 'Mozilla/5.0'}
     
     while True:
-        # API الموقع يدعم الترقيم
         url = f"https://api.rewayat.club/api/chapters/{slug}/?ordering=number&page={page}"
         try:
             print(f"Fetching chapters list page {page}...")
@@ -127,7 +123,7 @@ def fetch_all_chapters_list(slug):
                 break
                 
             page += 1
-            time.sleep(0.5) # مهلة بسيطة
+            time.sleep(0.5)
             
         except Exception as e:
             print(f"Error fetching chapters list: {e}")
@@ -145,7 +141,6 @@ def scrape_chapter_content(slug, chapter_num):
         if response.status_code == 200:
             soup = BeautifulSoup(response.content, 'html.parser')
             
-            # محاولة إيجاد النص في العناصر الشائعة
             content_div = soup.find('div', class_='content-area')
             
             if not content_div:
@@ -156,7 +151,6 @@ def scrape_chapter_content(slug, chapter_num):
                 text_content = "\n\n".join([p.get_text(strip=True) for p in paragraphs if p.get_text(strip=True)])
                 return text_content
             
-            # محاولة أخيرة: سحب كل النصوص p
             paragraphs = soup.find_all('p')
             clean_text = "\n\n".join([p.get_text(strip=True) for p in paragraphs if len(p.get_text(strip=True)) > 20])
             return clean_text
@@ -175,7 +169,6 @@ def background_worker(url, admin_email, author_name):
         print("❌ Invalid URL")
         return
 
-    # 1. جلب البيانات الوصفية
     metadata = fetch_novel_metadata(slug)
     if not metadata:
         print("❌ Failed to fetch metadata")
@@ -183,7 +176,6 @@ def background_worker(url, admin_email, author_name):
 
     print(f"📖 Found Novel: {metadata['title']}")
 
-    # 2. إنشاء/تحديث الرواية في MongoDB
     novel_doc = {
         'title': metadata['title'],
         'description': metadata['description'],
@@ -213,11 +205,9 @@ def background_worker(url, admin_email, author_name):
         novel_id = result.inserted_id
         print(f"🆕 Created new novel ID: {novel_id}")
 
-    # 3. جلب قائمة الفصول
     chapters_list = fetch_all_chapters_list(slug)
     print(f"📚 Found {len(chapters_list)} chapters.")
 
-    # 4. سحب الفصول وحفظها
     current_novel = novels_collection.find_one({'_id': novel_id})
     existing_numbers = [c['number'] for c in current_novel.get('chapters', [])]
 
@@ -232,33 +222,33 @@ def background_worker(url, admin_email, author_name):
         content = scrape_chapter_content(slug, num)
         
         if content:
-            # A. الحفظ في Firebase
             try:
+                # الحفظ في Firebase (المحتوى)
                 doc_ref = firestore_db.collection('novels').document(str(novel_id)).collection('chapters').document(str(num))
                 doc_ref.set({
                     'title': chap['title'],
                     'content': content,
                     'lastUpdated': firestore.SERVER_TIMESTAMP
                 })
-            except Exception as e:
-                print(f"❌ Firebase Error Ch {num}: {e}")
-                continue
 
-            # B. التجهيز لـ MongoDB
-            chapter_meta = {
-                'number': num,
-                'title': chap['title'],
-                'createdAt': datetime.now(),
-                'views': 0
-            }
-            
-            novels_collection.update_one(
-                {'_id': novel_id},
-                {'$push': {'chapters': chapter_meta}}
-            )
-            print(f"✅ Saved Chapter {num}")
-            
-            time.sleep(1) # احترام الموقع وتجنب الحظر
+                # التحديث في MongoDB (الميتا داتا)
+                chapter_meta = {
+                    'number': num,
+                    'title': chap['title'],
+                    'createdAt': datetime.now(),
+                    'views': 0
+                }
+                
+                novels_collection.update_one(
+                    {'_id': novel_id},
+                    {'$push': {'chapters': chapter_meta}}
+                )
+                print(f"✅ Saved Chapter {num}")
+                
+                time.sleep(1) 
+            except Exception as e:
+                print(f"❌ Firebase/Mongo Error Ch {num}: {e}")
+                continue
         else:
             print(f"⚠️ Empty content for Chapter {num}")
 
@@ -287,7 +277,7 @@ def trigger_scrape():
         return jsonify({'message': 'Invalid URL. Must be from rewayat.club'}), 400
 
     thread = threading.Thread(target=background_worker, args=(url, admin_email, author_name))
-    thread.daemon = True
+    thread.daemon = True 
     thread.start()
 
     return jsonify({
@@ -296,5 +286,6 @@ def trigger_scrape():
     }), 200
 
 if __name__ == "__main__":
+    # تشغيل السيرفر
     port = int(os.environ.get('PORT', 8080))
     app.run(host='0.0.0.0', port=port)
