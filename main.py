@@ -26,7 +26,7 @@ API_SECRET = os.environ.get('API_SECRET', 'Zeusndndjddnejdjdjdejekk29393838msmsk
 # ==========================================
 
 # 1. MongoDB Setup
-MONGO_URI = os.environ.get('MONGO_URI')
+MONGO_URI = os.environ.get('MONGODB_URI')
 if MONGO_URI:
     try:
         mongo_client = MongoClient(MONGO_URI, tlsCAFile=certifi.where())
@@ -39,7 +39,7 @@ else:
     print("⚠️ MONGO_URI not found in env vars")
 
 # 2. Firebase Setup
-FIREBASE_KEY = os.environ.get('FIREBASE_KEY')
+FIREBASE_KEY = os.environ.get('FIREBASE_SERVICE_ACCOUNT')
 if FIREBASE_KEY:
     try:
         # إذا كان المفتاح نص JSON (كما في Railway Variables)
