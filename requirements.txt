@@ -1,4 +1,8 @@
+flask
+flask-cors
 requests
 beautifulsoup4
-fastapi
-uvicorn
+firebase-admin
+pymongo
+dnspython
+gunicorn
