@@ -7,10 +7,6 @@ import re
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from bs4 import BeautifulSoup
-import firebase_admin
-from firebase_admin import credentials, firestore
-from pymongo import MongoClient
-import certifi
 from datetime import datetime
 
 # ==========================================
@@ -22,65 +18,12 @@ CORS(app)
 # مفتاح سري لحماية الرابط
 API_SECRET = os.environ.get('API_SECRET', 'Zeusndndjddnejdjdjdejekk29393838msmskxcm9239484jdndjdnddjj99292938338zeuslojdnejxxmejj82283849')
 
-# ==========================================
-# إعداد قواعد البيانات
-# ==========================================
-
-# 1. MongoDB Setup
-MONGO_URI = os.environ.get('MONGODB_URI')
-novels_collection = None
-if MONGO_URI:
-    try:
-        mongo_client = MongoClient(MONGO_URI, tlsCAFile=certifi.where())
-        mongo_db = mongo_client['zeus'] 
-        novels_collection = mongo_db['novels']
-        print("✅ Connected to MongoDB")
-    except Exception as e:
-        print(f"❌ MongoDB Connection Error: {e}")
-else:
-    print("⚠️ MONGODB_URI not found in env vars")
-
-# 2. Firebase Setup
-FIREBASE_KEY = os.environ.get('FIREBASE_SERVICE_ACCOUNT')
-firestore_db = None
-if FIREBASE_KEY:
-    try:
-        # تنظيف النص بشكل شامل
-        firebase_key_cleaned = FIREBASE_KEY.strip()
-        # إزالة أي BOM أو أحرف خفية
-        firebase_key_cleaned = firebase_key_cleaned.encode('utf-8').decode('utf-8-sig')
-        # تحويل إلى JSON
-        cred_dict = json.loads(firebase_key_cleaned)
-        
-        # إصلاح المفتاح الخاص بشكل دقيق
-        if 'private_key' in cred_dict:
-            private_key = cred_dict['private_key']
-            private_key = private_key.replace('\\n', '\n')
-            lines = private_key.split('\n')
-            cleaned_lines = []
-            for line in lines:
-                if '-----BEGIN' in line or '-----END' in line:
-                    cleaned_lines.append(line.strip())
-                else:
-                    cleaned_line = line.strip().replace(' ', '').replace('\t', '')
-                    if cleaned_line:
-                        cleaned_lines.append(cleaned_line)
-            cred_dict['private_key'] = '\n'.join(cleaned_lines)
-        
-        # تهيئة Firebase
-        if not firebase_admin._apps:
-            cred = credentials.Certificate(cred_dict)
-            firebase_admin.initialize_app(cred)
-        firestore_db = firestore.client()
-        print("✅ Connected to Firebase Firestore")
-        
-    except Exception as e:
-        print(f"❌ Firebase Connection Error: {e}")
-else:
-    print("⚠️ FIREBASE_SERVICE_ACCOUNT not found in env vars")
+# رابط الخادم الرئيسي (Node.js)
+# يتم جلبه من متغيرات البيئة أو استخدام الرابط الافتراضي
+NODE_BACKEND_URL = os.environ.get('NODE_BACKEND_URL', 'https://c-production-3db6.up.railway.app')
 
 # ==========================================
-# أدوات السحب (Scraper Tools) - تم التعديل هنا لضمان السحب
+# أدوات السحب (Scraper Tools)
 # ==========================================
 
 def get_headers():
@@ -89,16 +32,6 @@ def get_headers():
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
         'Accept-Language': 'ar,en-US;q=0.7,en;q=0.3'
     }
-
-def get_slug_from_url(url):
-    """استخراج المعرف الفريد للرواية من الرابط"""
-    try:
-        parts = url.rstrip('/').split('/novel/')
-        if len(parts) > 1:
-            return parts[1].split('/')[0]
-    except:
-        pass
-    return None
 
 def extract_background_image(style_str):
     """استخراج الرابط من ستايل background-image"""
@@ -121,11 +54,11 @@ def fetch_novel_metadata_html(url):
             
         soup = BeautifulSoup(response.content, 'html.parser')
         
-        # 1. Title - البحث في h1 مباشرة كما في الكود الناجح
+        # 1. Title
         title_tag = soup.find('h1')
         title = title_tag.get_text(strip=True) if title_tag else "Unknown Title"
         
-        # 2. Cover - محاولة جلب الغلاف من تاق og:image لضمان النجاح
+        # 2. Cover
         cover_url = ""
         og_image = soup.find("meta", property="og:image")
         if og_image:
@@ -144,7 +77,6 @@ def fetch_novel_metadata_html(url):
         tags = []
         category = "عام"
         
-        # البحث عن الكلمات المفتاحية في الصفحة للحالة والتصنيف
         chips = soup.find_all(class_='v-chip__content')
         for chip in chips:
             text = chip.get_text(strip=True)
@@ -156,7 +88,7 @@ def fetch_novel_metadata_html(url):
         if tags:
             category = tags[0]
 
-        # 5. Total Chapters - محاولة جلب الرقم من النص العام إذا فشلت التابات
+        # 5. Total Chapters
         total_chapters = 0
         all_text = soup.get_text()
         chapter_match = re.search(r'الفصول\s*\((\d+)\)', all_text)
@@ -187,7 +119,7 @@ def fetch_novel_metadata_html(url):
         return None
 
 def scrape_chapter_content_html(novel_url, chapter_num):
-    """سحب نص الفصل باستخدام استهداف الوسوم المباشرة (المنطق الناجح)"""
+    """سحب نص الفصل"""
     url = f"{novel_url.rstrip('/')}/{chapter_num}"
     try:
         response = requests.get(url, headers=get_headers(), timeout=10)
@@ -196,29 +128,23 @@ def scrape_chapter_content_html(novel_url, chapter_num):
             
         soup = BeautifulSoup(response.content, 'html.parser')
         
-        # الطريقة الناجحة: البحث عن جميع وسوم p التي تحتوي على نص حقيقي
         paragraphs = soup.find_all('p')
-        # تنظيف وفلترة النصوص (استبعاد الإعلانات والجمل القصيرة جداً)
         clean_paragraphs = [p.get_text(strip=True) for p in paragraphs if len(p.get_text(strip=True)) > 20]
         
         if clean_paragraphs:
             text_content = "\n\n".join(clean_paragraphs)
         else:
-            # محاولة احتياطية: إذا لم يجد p، يبحث في الـ div الرئيسي للمحتوى
             content_div = soup.find('div', class_='pre-formatted') or soup.find('div', class_='v-card__text')
             if content_div:
                 text_content = content_div.get_text(separator="\n\n", strip=True)
             else:
                 return None, None
             
-        # التأكد من وجود نص حقيقي
         if len(text_content.strip()) < 50:
             return None, None
 
-        # استخراج العنوان من v-card__subtitle أو h1
         title_tag = soup.find(class_='v-card__subtitle') or soup.find('h1')
         title = title_tag.get_text(strip=True) if title_tag else f"الفصل {chapter_num}"
-        # إزالة أي أرقام زائدة من بداية العنوان
         title = re.sub(r'^\d+\s*-\s*', '', title)
 
         return title, text_content
@@ -227,105 +153,90 @@ def scrape_chapter_content_html(novel_url, chapter_num):
         print(f"Error scraping chapter {chapter_num}: {e}")
         return None, None
 
+def send_data_to_backend(payload):
+    """إرسال البيانات إلى الخادم الرئيسي Node.js"""
+    try:
+        endpoint = f"{NODE_BACKEND_URL}/api/scraper/receive"
+        headers = {
+            'Content-Type': 'application/json',
+            'Authorization': API_SECRET,
+            'x-api-secret': API_SECRET
+        }
+        response = requests.post(endpoint, json=payload, headers=headers, timeout=60)
+        
+        if response.status_code == 200:
+            print("✅ Data sent to backend successfully.")
+            return True
+        else:
+            print(f"❌ Backend Error ({response.status_code}): {response.text}")
+            return False
+    except Exception as e:
+        print(f"❌ Failed to send data to backend: {e}")
+        return False
+
 def background_worker(url, admin_email, author_name):
     """الوظيفة التي تعمل في الخلفية"""
-    print(f"🚀 Starting HTML scraper for: {url}")
+    print(f"🚀 Starting Scraper for: {url}")
     
-    # 1. جلب البيانات الوصفية
+    # 1. جلب البيانات الوصفية للرواية
     metadata = fetch_novel_metadata_html(url)
     if not metadata:
-        print("❌ Failed to fetch metadata from HTML")
+        print("❌ Failed to fetch metadata")
+        # Send error log to backend
+        send_data_to_backend({'adminEmail': admin_email, 'error': 'فشل في جلب بيانات الرواية من المصدر'})
         return
 
     print(f"📖 Found Novel: {metadata['title']} ({metadata['total_chapters']} Chapters)")
 
-    # 2. إنشاء أو تحديث الرواية في MongoDB
-    novel_id = None
-    if novels_collection is not None:
-        try:
-            existing_novel = novels_collection.find_one({'title': metadata['title'], 'authorEmail': admin_email})
-            
-            novel_doc = {
-                'title': metadata['title'],
-                'description': metadata['description'],
-                'cover': metadata['cover'],
-                'author': author_name,
-                'authorEmail': admin_email,
-                'category': metadata['category'],
-                'tags': metadata['tags'],
-                'status': metadata['status'],
-                'sourceUrl': url,
-                'lastChapterUpdate': datetime.now()
-            }
-
-            if existing_novel:
-                novel_id = existing_novel['_id']
-                novels_collection.update_one({'_id': novel_id}, {'$set': novel_doc})
-                print(f"🔄 Novel updated in MongoDB: {novel_id}")
-            else:
-                novel_doc['createdAt'] = datetime.now()
-                novel_doc['chapters'] = []
-                novel_doc['views'] = 0
-                result = novels_collection.insert_one(novel_doc)
-                novel_id = result.inserted_id
-                print(f"🆕 New novel created in MongoDB: {novel_id}")
-        except Exception as e:
-            print(f"❌ MongoDB operation error: {e}")
-            return
-    else:
-        print("❌ MongoDB not connected, cannot proceed.")
+    # 2. إرسال البيانات الوصفية أولاً لإنشاء الرواية ورفع الصورة في الخادم
+    # نرسل chapters فارغة لإنشاء الرواية فقط
+    init_payload = {
+        'adminEmail': admin_email,
+        'novelData': metadata,
+        'chapters': [] 
+    }
+    
+    if not send_data_to_backend(init_payload):
+        print("❌ Stopping execution because initial handshake failed.")
         return
 
-    # 3. حلقة سحب الفصول
+    # 3. حلقة سحب الفصول وإرسالها على دفعات (Batches)
     total = metadata['total_chapters']
     if total == 0:
-        print("⚠️ No chapters count found, trying first 100 blind...")
-        total = 100
-
-    # جلب قائمة الفصول الموجودة حالياً لتجنب التكرار
-    current_novel = novels_collection.find_one({'_id': novel_id})
-    existing_numbers = [c['number'] for c in current_novel.get('chapters', [])] if current_novel else []
+        total = 50 # Fallback default
+        
+    batch_size = 5 # إرسال كل 5 فصول دفعة واحدة لتخفيف الحمل وتسريع الاستجابة
+    current_batch = []
 
     for num in range(1, total + 1):
-        if num in existing_numbers:
-            print(f"⏩ Skipping Ch {num} (Exists)")
-            continue
-
         chap_title, content = scrape_chapter_content_html(url, num)
         
         if content:
-            try:
-                # أ) الحفظ في Firebase (المحتوى النصي)
-                if firestore_db is not None:
-                    doc_ref = firestore_db.collection('novels').document(str(novel_id)).collection('chapters').document(str(num))
-                    doc_ref.set({
-                        'title': chap_title,
-                        'content': content,
-                        'lastUpdated': firestore.SERVER_TIMESTAMP
-                    })
-
-                # ب) التحديث في MongoDB (قائمة الفصول)
-                if novels_collection is not None:
-                    chapter_meta = {
-                        'number': num,
-                        'title': chap_title,
-                        'createdAt': datetime.now(),
-                        'views': 0
-                    }
-                    novels_collection.update_one(
-                        {'_id': novel_id},
-                        {'$push': {'chapters': chapter_meta}}
-                    )
-                
-                print(f"✅ Chapter {num} uploaded successfully.")
-                time.sleep(1.2) # تأخير بسيط لتجنب الحظر على Railway
-                
-            except Exception as e:
-                print(f"❌ DB Save Error Ch {num}: {e}")
+            chapter_data = {
+                'number': num,
+                'title': chap_title,
+                'content': content
+            }
+            current_batch.append(chapter_data)
+            print(f"📄 Scraped Chapter {num}")
         else:
             print(f"⚠️ Failed to scrape content for Ch {num}")
 
+        # إذا اكتملت الدفعة أو وصلنا للنهاية
+        if len(current_batch) >= batch_size or num == total:
+            if current_batch:
+                print(f"📤 Sending batch of {len(current_batch)} chapters...")
+                payload = {
+                    'adminEmail': admin_email,
+                    'novelData': metadata, # نرسل الميتاداتا دائماً للتأكيد
+                    'chapters': current_batch
+                }
+                send_data_to_backend(payload)
+                current_batch = [] # تصفير الدفعة
+                time.sleep(1) # استراحة بسيطة
+
     print("✨ Scraping Task Completed Successfully!")
+    # إرسال إشعار اكتمال (اختياري، الخادم سيعرف من التحديثات)
 
 # ==========================================
 # نقاط النهاية (Endpoints)
@@ -333,7 +244,7 @@ def background_worker(url, admin_email, author_name):
 
 @app.route('/', methods=['GET'])
 def health_check():
-    return "ZEUS HTML Scraper Service is Running ⚡ v2.2 (Enhanced Logic)", 200
+    return "ZEUS Scraper Service (Relay Mode) is Running ⚡", 200
 
 @app.route('/scrape', methods=['POST'])
 def trigger_scrape():
@@ -358,7 +269,7 @@ def trigger_scrape():
     thread.start()
 
     return jsonify({
-        'message': 'تم بدء العملية بنجاح. المحرك يعمل الآن على سحب البيانات وحفظها في قواعد بياناتك.',
+        'message': 'تم بدء العملية. سيتم إرسال البيانات للخادم الرئيسي تدريجياً.',
         'status': 'started'
     }), 200
 
