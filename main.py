@@ -1,4 +1,3 @@
-
 import os
 import json
 import time
@@ -179,18 +178,24 @@ def scrape_chapter_content_html(novel_url, chapter_num):
         soup = BeautifulSoup(response.content, 'html.parser')
         
         paragraphs = soup.find_all('p')
-        clean_paragraphs = [p.get_text(strip=True) for p in paragraphs if len(p.get_text(strip=True)) > 20]
+        
+        # === تم التعديل هنا: إزالة شرط الطول (> 20) لسحب كل شيء ===
+        # الآن نتحقق فقط من أن الفقرة ليست فارغة تماماً
+        clean_paragraphs = [p.get_text(strip=True) for p in paragraphs if p.get_text(strip=True)]
         
         if clean_paragraphs:
             text_content = "\n\n".join(clean_paragraphs)
         else:
+            # محاولة بديلة إذا لم تكن هناك وسوم <p>
             content_div = soup.find('div', class_='pre-formatted') or soup.find('div', class_='v-card__text')
             if content_div:
                 text_content = content_div.get_text(separator="\n\n", strip=True)
             else:
                 return None, None
             
-        if len(text_content.strip()) < 50:
+        # === تم التعديل هنا: تخفيف شرط الحد الأدنى لطول الفصل ===
+        # كان < 50 سابقاً، جعلناه < 2 ليسمح بالفصول القصيرة جداً أو الملاحظات
+        if len(text_content.strip()) < 2:
             return None, None
 
         title_tag = soup.find(class_='v-card__subtitle') or soup.find('h1')
