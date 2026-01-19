@@ -194,14 +194,38 @@ def fetch_metadata_madara(url):
             og_img = soup.find("meta", property="og:image")
             if og_img: cover = og_img["content"]
 
-        # ID for AJAX
+        # ID for AJAX - IMPROVED EXTRACTION
         novel_id = None
-        id_input = soup.find('input', class_='rating-post-id')
-        if id_input: novel_id = id_input.get('value')
-        else:
+        
+        # Method 1: Shortlink (Best for WP)
+        shortlink = soup.find("link", rel="shortlink")
+        if shortlink:
+            # href="https://ar-no.com/?p=269062"
+            match = re.search(r'p=(\d+)', shortlink.get('href', ''))
+            if match: novel_id = match.group(1)
+            
+        # Method 2: Hidden Input
+        if not novel_id:
+            id_input = soup.find('input', class_='rating-post-id')
+            if id_input: novel_id = id_input.get('value')
+            
+        # Method 3: Container Data Attribute
+        if not novel_id:
             div_id = soup.find('div', id='manga-chapters-holder')
             if div_id: novel_id = div_id.get('data-id')
+            
+        # Method 4: Variable in Script
+        if not novel_id:
+            scripts = soup.find_all('script')
+            for s in scripts:
+                if s.string and 'manga_id' in s.string:
+                    match = re.search(r'"manga_id":"(\d+)"', s.string)
+                    if match:
+                        novel_id = match.group(1)
+                        break
         
+        print(f"🔍 Found Novel ID: {novel_id}")
+
         # Description
         desc_div = soup.find(class_='summary__content') or soup.find(class_='description-summary')
         description = desc_div.get_text(separator="\n", strip=True) if desc_div else ""
@@ -230,8 +254,15 @@ def fetch_chapter_list_madara(novel_id):
     try:
         ajax_url = "https://ar-no.com/wp-admin/admin-ajax.php"
         data = {'action': 'manga_get_chapters', 'manga': novel_id}
-        res = requests.post(ajax_url, data=data, headers=get_headers())
-        if res.status_code != 200: return []
+        
+        # Important: Some WP themes check for XMLHttpRequest
+        headers = get_headers()
+        headers['X-Requested-With'] = 'XMLHttpRequest'
+        
+        res = requests.post(ajax_url, data=data, headers=headers)
+        if res.status_code != 200: 
+            print(f"⚠️ AJAX Error: {res.status_code}")
+            return []
         
         soup = BeautifulSoup(res.content, 'html.parser')
         chapters = []
@@ -240,6 +271,12 @@ def fetch_chapter_list_madara(novel_id):
         # Usually ordered Newest -> Oldest. We want Oldest -> Newest.
         
         items = soup.find_all('li', class_='wp-manga-chapter')
+        if not items:
+            print("⚠️ No chapters found in AJAX response.")
+            # Debug: Check if '0' is returned (AJAX error)
+            if res.text.strip() == '0':
+                print("⚠️ Admin-ajax returned 0. Check ID or Headers.")
+        
         for item in items:
             a = item.find('a')
             if a:
@@ -273,16 +310,23 @@ def scrape_chapter_madara(url):
         # Content is usually in .text-left within .reading-content
         container = soup.find(class_='text-left')
         if not container: container = soup.find(class_='entry-content')
+        if not container: container = soup.find(class_='reading-content') # Fallback
         
-        # Remove ads
-        for bad in container.find_all(['div', 'script'], class_=['code-block', 'adsbygoogle']):
-            bad.decompose()
+        if container:
+            # Remove ads
+            for bad in container.find_all(['div', 'script', 'style'], class_=['code-block', 'adsbygoogle', 'pf-ad', 'wp-dark-mode-switcher']):
+                bad.decompose()
             
-        text = container.get_text(separator="\n\n", strip=True)
-        # Fix double newlines
-        text = re.sub(r'\n{3,}', '\n\n', text)
+            # Remove next/prev links inside content if any
+            for nav in container.find_all('div', class_='nav-links'):
+                nav.decompose()
+
+            text = container.get_text(separator="\n\n", strip=True)
+            # Fix double newlines
+            text = re.sub(r'\n{3,}', '\n\n', text)
+            return text
         
-        return text
+        return None
     except: return None
 
 def worker_madara_list(url, admin_email, metadata):
@@ -296,6 +340,12 @@ def worker_madara_list(url, admin_email, metadata):
     # 2. Get Full List
     print(f"📋 Fetching full chapter list for ID: {metadata['novel_id']}")
     all_chapters = fetch_chapter_list_madara(metadata['novel_id'])
+    
+    if not all_chapters:
+        print(f"⚠️ Failed to get chapters list for {metadata['novel_id']}")
+        # Fallback: Can't do much without a list in Madara structure unless we parse the HTML page itself if it contains the list (usually it doesn't for long novels)
+        return
+
     print(f"📋 Found {len(all_chapters)} chapters on source.")
     
     batch = []
@@ -319,7 +369,7 @@ def worker_madara_list(url, admin_email, metadata):
                 send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': batch, 'skipMetadataUpdate': skip_meta})
                 print(f"📤 Sent {len(batch)} chapters.")
                 batch = []
-                time.sleep(1) # Be gentle
+                time.sleep(1.5) # Be gentle
         else:
             print(f"⚠️ Failed content for Ch {chap['number']}")
             
