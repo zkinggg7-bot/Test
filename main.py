@@ -30,7 +30,8 @@ def get_headers():
     return {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Accept-Language': 'ar,en-US;q=0.7,en;q=0.3'
+        'Accept-Language': 'ar,en-US;q=0.7,en;q=0.3',
+        'Referer': 'https://ar-no.com/'
     }
 
 def fix_image_url(url, base_url='https://api.rewayat.club'):
@@ -248,58 +249,75 @@ def fetch_metadata_madara(url):
         print(f"Error Madara Meta: {e}")
         return None
 
-def fetch_chapter_list_madara(novel_id):
-    """Get all chapters via AJAX"""
-    if not novel_id: return []
-    try:
-        ajax_url = "https://ar-no.com/wp-admin/admin-ajax.php"
-        data = {'action': 'manga_get_chapters', 'manga': novel_id}
-        
-        # Important: Some WP themes check for XMLHttpRequest
-        headers = get_headers()
-        headers['X-Requested-With'] = 'XMLHttpRequest'
-        
-        res = requests.post(ajax_url, data=data, headers=headers)
-        if res.status_code != 200: 
-            print(f"⚠️ AJAX Error: {res.status_code}")
-            return []
-        
-        soup = BeautifulSoup(res.content, 'html.parser')
-        chapters = []
-        
-        # Madara lists items: <li class="wp-manga-chapter"> <a href="url"> Title </a> </li>
-        # Usually ordered Newest -> Oldest. We want Oldest -> Newest.
-        
-        items = soup.find_all('li', class_='wp-manga-chapter')
-        if not items:
-            print("⚠️ No chapters found in AJAX response.")
-            # Debug: Check if '0' is returned (AJAX error)
-            if res.text.strip() == '0':
-                print("⚠️ Admin-ajax returned 0. Check ID or Headers.")
-        
-        for item in items:
-            a = item.find('a')
-            if a:
-                link = a.get('href')
-                raw_title = a.get_text(strip=True)
-                
-                # Extract number
-                # Titles like: "347 - Name" or "Chapter 10"
-                num_match = re.search(r'(\d+)', raw_title)
-                number = int(num_match.group(1)) if num_match else 0
-                
-                # Clean title
-                clean_title = re.sub(r'^\d+\s*[-–]\s*', '', raw_title).strip()
-                
-                if number > 0:
-                    chapters.append({'number': number, 'url': link, 'title': clean_title})
-        
-        # Sort by number ascending
+def parse_madara_chapters_from_html(soup):
+    """Helper to parse chapters from a BeautifulSoup object containing <li class='wp-manga-chapter'>"""
+    chapters = []
+    items = soup.find_all('li', class_='wp-manga-chapter')
+    
+    for item in items:
+        a = item.find('a')
+        if a:
+            link = a.get('href')
+            raw_title = a.get_text(strip=True)
+            
+            # Extract number
+            # Titles like: "347 - Name" or "Chapter 10" or "الفصل 10"
+            # Try to find the first integer in the string
+            num_match = re.search(r'(\d+)', raw_title)
+            number = int(num_match.group(1)) if num_match else 0
+            
+            # Clean title
+            clean_title = re.sub(r'^\d+\s*[-–]\s*', '', raw_title).strip()
+            
+            if number > 0:
+                chapters.append({'number': number, 'url': link, 'title': clean_title})
+    
+    return chapters
+
+def fetch_chapter_list_madara(novel_id, novel_url=None):
+    """Get all chapters via AJAX or fallback to scraping the HTML page directly"""
+    chapters = []
+    
+    # 1. Try fetching directly from the novel page (Server Side Rendered)
+    if novel_url:
+        print(f"📋 Trying to fetch chapters from HTML page: {novel_url}")
+        try:
+            # Often madara themes show the list on the main page
+            res = requests.get(novel_url, headers=get_headers(), timeout=15)
+            if res.status_code == 200:
+                soup = BeautifulSoup(res.content, 'html.parser')
+                chapters = parse_madara_chapters_from_html(soup)
+                if chapters:
+                    print(f"✅ Found {len(chapters)} chapters in HTML.")
+                    chapters.sort(key=lambda x: x['number'])
+                    return chapters
+        except Exception as e:
+            print(f"⚠️ Failed HTML fetch: {e}")
+
+    # 2. Try AJAX if HTML failed
+    if not chapters and novel_id:
+        print(f"📋 Trying AJAX fetch for ID: {novel_id}")
+        try:
+            ajax_url = "https://ar-no.com/wp-admin/admin-ajax.php"
+            data = {'action': 'manga_get_chapters', 'manga': novel_id}
+            
+            headers = get_headers()
+            headers['X-Requested-With'] = 'XMLHttpRequest'
+            headers['Content-Type'] = 'application/x-www-form-urlencoded; charset=UTF-8'
+            
+            res = requests.post(ajax_url, data=data, headers=headers)
+            if res.status_code == 200: 
+                soup = BeautifulSoup(res.content, 'html.parser')
+                chapters = parse_madara_chapters_from_html(soup)
+                print(f"✅ Found {len(chapters)} chapters via AJAX.")
+        except Exception as e:
+            print(f"Error fetching chapter list AJAX: {e}")
+            
+    # Sort by number ascending
+    if chapters:
         chapters.sort(key=lambda x: x['number'])
-        return chapters
-    except Exception as e:
-        print(f"Error fetching chapter list: {e}")
-        return []
+    
+    return chapters
 
 def scrape_chapter_madara(url):
     try:
@@ -308,22 +326,37 @@ def scrape_chapter_madara(url):
         soup = BeautifulSoup(res.content, 'html.parser')
         
         # Content is usually in .text-left within .reading-content
-        container = soup.find(class_='text-left')
-        if not container: container = soup.find(class_='entry-content')
-        if not container: container = soup.find(class_='reading-content') # Fallback
+        # Based on file provided: <div class="reading-content"> ... <div class="text-left"> ... </div> </div>
         
+        container = soup.find(class_='text-left')
+        
+        if not container:
+            # Fallback 1: reading-content
+            container = soup.find(class_='reading-content')
+        
+        if not container:
+            # Fallback 2: entry-content
+            container = soup.find(class_='entry-content')
+            
         if container:
-            # Remove ads
-            for bad in container.find_all(['div', 'script', 'style'], class_=['code-block', 'adsbygoogle', 'pf-ad', 'wp-dark-mode-switcher']):
+            # Remove ads and junk
+            for bad in container.find_all(['div', 'script', 'style', 'input'], class_=['code-block', 'adsbygoogle', 'pf-ad', 'wp-dark-mode-switcher']):
                 bad.decompose()
             
             # Remove next/prev links inside content if any
             for nav in container.find_all('div', class_='nav-links'):
                 nav.decompose()
+            
+            # Remove the hidden input for chapter ID
+            for inp in container.find_all('input', id='wp-manga-current-chap'):
+                inp.decompose()
 
             text = container.get_text(separator="\n\n", strip=True)
-            # Fix double newlines
+            
+            # Cleanup text
             text = re.sub(r'\n{3,}', '\n\n', text)
+            text = text.replace('اكمال القراءة', '') # Common artifact
+            
             return text
         
         return None
@@ -337,13 +370,13 @@ def worker_madara_list(url, admin_email, metadata):
     if not skip_meta:
         send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': [], 'skipMetadataUpdate': False})
 
-    # 2. Get Full List
+    # 2. Get Full List (Pass URL now for fallback)
     print(f"📋 Fetching full chapter list for ID: {metadata['novel_id']}")
-    all_chapters = fetch_chapter_list_madara(metadata['novel_id'])
+    all_chapters = fetch_chapter_list_madara(metadata['novel_id'], url)
     
     if not all_chapters:
-        print(f"⚠️ Failed to get chapters list for {metadata['novel_id']}")
-        # Fallback: Can't do much without a list in Madara structure unless we parse the HTML page itself if it contains the list (usually it doesn't for long novels)
+        print(f"⚠️ Failed to get chapters list for {metadata['novel_id']}. Trying to check if URL was a chapter URL...")
+        # Emergency check: if the user provided a chapter URL instead of novel URL, we can't scrape list easily.
         return
 
     print(f"📋 Found {len(all_chapters)} chapters on source.")
@@ -369,7 +402,7 @@ def worker_madara_list(url, admin_email, metadata):
                 send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': batch, 'skipMetadataUpdate': skip_meta})
                 print(f"📤 Sent {len(batch)} chapters.")
                 batch = []
-                time.sleep(1.5) # Be gentle
+                time.sleep(1.0) # Be gentle
         else:
             print(f"⚠️ Failed content for Ch {chap['number']}")
             
@@ -410,9 +443,7 @@ def trigger_scrape():
         meta = fetch_metadata_madara(url)
         if not meta: return jsonify({'message': 'Failed metadata', 'error': 'Could not fetch metadata from Ar-Novel'}), 400
         
-        if not meta['novel_id']:
-             return jsonify({'message': 'Failed ID', 'error': 'Could not find Novel ID for AJAX'}), 400
-
+        # Proceed even if ID is missing, as we might scrape from HTML list
         thread = threading.Thread(target=worker_madara_list, args=(url, admin_email, meta))
         thread.daemon = True
         thread.start()
