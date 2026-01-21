@@ -1,4 +1,3 @@
-
 import os
 import json
 import time
@@ -56,7 +55,7 @@ def send_data_to_backend(payload):
         return False
 
 def check_existing_chapters(title):
-    """التحقق من الفصول الموجودة في الباك إند"""
+    """التحقق من الفصول الموجودة في الباك إند لمنع التكرار"""
     try:
         endpoint = f"{NODE_BACKEND_URL}/api/scraper/check-chapters"
         headers = { 'Content-Type': 'application/json', 'Authorization': API_SECRET, 'x-api-secret': API_SECRET }
@@ -183,55 +182,47 @@ def fetch_metadata_madara(url):
         if response.status_code != 200: return None
         soup = BeautifulSoup(response.content, 'html.parser')
         
-        # Title
+        # استخراج العنوان
         title_tag = soup.find(class_='post-title')
         title = title_tag.find('h1').get_text(strip=True) if title_tag else "Unknown"
-        title = re.sub(r'\s*~.*$', '', title) # Remove "~ Ar Novel" suffix if present
+        title = re.sub(r'\s*~.*$', '', title) 
 
-        # Cover
-        img_tag = soup.find(class_='summary_image').find('img')
-        cover = img_tag.get('src') if img_tag else ""
+        # استخراج الغلاف
+        cover = ""
+        img_container = soup.find(class_='summary_image')
+        if img_container:
+            img_tag = img_container.find('img')
+            if img_tag:
+                cover = img_tag.get('src') or img_tag.get('data-src') or img_tag.get('srcset', '').split(' ')[0]
+        
         if not cover:
             og_img = soup.find("meta", property="og:image")
             if og_img: cover = og_img["content"]
 
-        # ID for AJAX - IMPROVED EXTRACTION
+        # استخراج ID الرواية (هام لطلب AJAX)
         novel_id = None
-        
-        # Method 1: Shortlink (Best for WP)
         shortlink = soup.find("link", rel="shortlink")
         if shortlink:
-            # href="https://ar-no.com/?p=269062"
             match = re.search(r'p=(\d+)', shortlink.get('href', ''))
             if match: novel_id = match.group(1)
             
-        # Method 2: Hidden Input
         if not novel_id:
             id_input = soup.find('input', class_='rating-post-id')
             if id_input: novel_id = id_input.get('value')
             
-        # Method 3: Container Data Attribute
         if not novel_id:
-            div_id = soup.find('div', id='manga-chapters-holder')
-            if div_id: novel_id = div_id.get('data-id')
-            
-        # Method 4: Variable in Script
-        if not novel_id:
-            scripts = soup.find_all('script')
-            for s in scripts:
-                if s.string and 'manga_id' in s.string:
-                    match = re.search(r'"manga_id":"(\d+)"', s.string)
-                    if match:
-                        novel_id = match.group(1)
-                        break
-        
+            body_class = soup.find('body').get('class', [])
+            for c in body_class:
+                if c.startswith('manga-id-'):
+                    novel_id = c.replace('manga-id-', '')
+
         print(f"🔍 Found Novel ID: {novel_id}")
 
-        # Description
+        # الوصف
         desc_div = soup.find(class_='summary__content') or soup.find(class_='description-summary')
         description = desc_div.get_text(separator="\n", strip=True) if desc_div else ""
 
-        # Tags/Category
+        # التصنيفات
         genres_content = soup.find(class_='genres-content')
         category = "عام"
         tags = []
@@ -250,8 +241,9 @@ def fetch_metadata_madara(url):
         return None
 
 def parse_madara_chapters_from_html(soup):
-    """Helper to parse chapters from a BeautifulSoup object containing <li class='wp-manga-chapter'>"""
+    """تحليل الفصول من كود HTML (سواء من الصفحة الرئيسية أو من AJAX)"""
     chapters = []
+    # البحث عن عناصر الفصول القياسية في ثيم مادارا
     items = soup.find_all('li', class_='wp-manga-chapter')
     
     for item in items:
@@ -260,13 +252,11 @@ def parse_madara_chapters_from_html(soup):
             link = a.get('href')
             raw_title = a.get_text(strip=True)
             
-            # Extract number
-            # Titles like: "347 - Name" or "Chapter 10" or "الفصل 10"
-            # Try to find the first integer in the string
+            # استخراج الرقم (أول عدد يظهر في العنوان)
             num_match = re.search(r'(\d+)', raw_title)
             number = int(num_match.group(1)) if num_match else 0
             
-            # Clean title
+            # تنظيف العنوان من الأرقام في البداية
             clean_title = re.sub(r'^\d+\s*[-–]\s*', '', raw_title).strip()
             
             if number > 0:
@@ -275,45 +265,39 @@ def parse_madara_chapters_from_html(soup):
     return chapters
 
 def fetch_chapter_list_madara(novel_id, novel_url=None):
-    """Get all chapters via AJAX or fallback to scraping the HTML page directly"""
+    """جلب قائمة الفصول بالكامل باستخدام AJAX أو التحليل المباشر"""
     chapters = []
     
-    # 1. Try fetching directly from the novel page (Server Side Rendered)
+    # محاولة 1: جلب الفصول عبر رابط AJAX الخاص بالثيم (الأكثر ضماناً)
     if novel_url:
-        print(f"📋 Trying to fetch chapters from HTML page: {novel_url}")
+        ajax_endpoint = f"{novel_url.rstrip('/')}/ajax/chapters/"
+        print(f"📋 Trying Madara AJAX endpoint: {ajax_endpoint}")
         try:
-            # Often madara themes show the list on the main page
-            res = requests.get(novel_url, headers=get_headers(), timeout=15)
+            headers = get_headers()
+            headers['X-Requested-With'] = 'XMLHttpRequest'
+            res = requests.post(ajax_endpoint, headers=headers, timeout=20)
             if res.status_code == 200:
                 soup = BeautifulSoup(res.content, 'html.parser')
                 chapters = parse_madara_chapters_from_html(soup)
                 if chapters:
-                    print(f"✅ Found {len(chapters)} chapters in HTML.")
-                    chapters.sort(key=lambda x: x['number'])
+                    print(f"✅ Found {len(chapters)} chapters via AJAX.")
                     return chapters
         except Exception as e:
-            print(f"⚠️ Failed HTML fetch: {e}")
+            print(f"⚠️ AJAX endpoint failed: {e}")
 
-    # 2. Try AJAX if HTML failed
+    # محاولة 2: محاولة admin-ajax.php التقليدية
     if not chapters and novel_id:
-        print(f"📋 Trying AJAX fetch for ID: {novel_id}")
         try:
             ajax_url = "https://ar-no.com/wp-admin/admin-ajax.php"
             data = {'action': 'manga_get_chapters', 'manga': novel_id}
-            
-            headers = get_headers()
-            headers['X-Requested-With'] = 'XMLHttpRequest'
-            headers['Content-Type'] = 'application/x-www-form-urlencoded; charset=UTF-8'
-            
-            res = requests.post(ajax_url, data=data, headers=headers)
-            if res.status_code == 200: 
+            res = requests.post(ajax_url, data=data, headers=get_headers(), timeout=20)
+            if res.status_code == 200:
                 soup = BeautifulSoup(res.content, 'html.parser')
                 chapters = parse_madara_chapters_from_html(soup)
-                print(f"✅ Found {len(chapters)} chapters via AJAX.")
         except Exception as e:
-            print(f"Error fetching chapter list AJAX: {e}")
+            print(f"Error admin-ajax: {e}")
             
-    # Sort by number ascending
+    # ترتيب الفصول تصاعدياً
     if chapters:
         chapters.sort(key=lambda x: x['number'])
     
@@ -325,37 +309,24 @@ def scrape_chapter_madara(url):
         if res.status_code != 200: return None
         soup = BeautifulSoup(res.content, 'html.parser')
         
-        # Content is usually in .text-left within .reading-content
-        # Based on file provided: <div class="reading-content"> ... <div class="text-left"> ... </div> </div>
-        
-        container = soup.find(class_='text-left')
-        
-        if not container:
-            # Fallback 1: reading-content
-            container = soup.find(class_='reading-content')
-        
-        if not container:
-            # Fallback 2: entry-content
-            container = soup.find(class_='entry-content')
+        # محاولة إيجاد الحاوية النصية بأكثر من احتمال
+        container = soup.find(class_='text-left') or soup.find(class_='reading-content') or soup.find(class_='entry-content')
             
         if container:
-            # Remove ads and junk
-            for bad in container.find_all(['div', 'script', 'style', 'input'], class_=['code-block', 'adsbygoogle', 'pf-ad', 'wp-dark-mode-switcher']):
-                bad.decompose()
+            # تنظيف الإعلانات والسكريبتات
+            for bad in container.find_all(['div', 'script', 'style', 'input', 'ins', 'iframe']):
+                if bad.get('class') and any(c in ['code-block', 'adsbygoogle', 'pf-ad'] for c in bad.get('class')):
+                    bad.decompose()
             
-            # Remove next/prev links inside content if any
+            # إزالة أزرار التنقل (السابق والتالي) إذا كانت داخل المحتوى
             for nav in container.find_all('div', class_='nav-links'):
                 nav.decompose()
-            
-            # Remove the hidden input for chapter ID
-            for inp in container.find_all('input', id='wp-manga-current-chap'):
-                inp.decompose()
 
             text = container.get_text(separator="\n\n", strip=True)
             
-            # Cleanup text
+            # تنظيف النصوص المتكررة
             text = re.sub(r'\n{3,}', '\n\n', text)
-            text = text.replace('اكمال القراءة', '') # Common artifact
+            text = text.replace('اكمال القراءة', '')
             
             return text
         
@@ -363,32 +334,30 @@ def scrape_chapter_madara(url):
     except: return None
 
 def worker_madara_list(url, admin_email, metadata):
-    # 1. Check Backend
+    # 1. التحقق من الباك إند
     existing_chapters = check_existing_chapters(metadata['title'])
     skip_meta = len(existing_chapters) > 0
     
     if not skip_meta:
         send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': [], 'skipMetadataUpdate': False})
 
-    # 2. Get Full List (Pass URL now for fallback)
-    print(f"📋 Fetching full chapter list for ID: {metadata['novel_id']}")
-    all_chapters = fetch_chapter_list_madara(metadata['novel_id'], url)
+    # 2. جلب القائمة الكاملة
+    all_chapters = fetch_chapter_list_madara(metadata.get('novel_id'), url)
     
     if not all_chapters:
-        print(f"⚠️ Failed to get chapters list for {metadata['novel_id']}. Trying to check if URL was a chapter URL...")
-        # Emergency check: if the user provided a chapter URL instead of novel URL, we can't scrape list easily.
+        print(f"⚠️ No chapters found for {metadata['title']}")
         return
 
-    print(f"📋 Found {len(all_chapters)} chapters on source.")
+    print(f"📋 Processing {len(all_chapters)} chapters.")
     
     batch = []
     
-    # 3. Iterate (Skip existing)
+    # 3. السحب والدفع
     for chap in all_chapters:
         if chap['number'] in existing_chapters:
             continue
             
-        print(f"📥 Scraping Ar-Novel Ch {chap['number']}...")
+        print(f"📥 Scraping {metadata['title']} - Ch {chap['number']}...")
         content = scrape_chapter_madara(chap['url'])
         
         if content:
@@ -400,15 +369,12 @@ def worker_madara_list(url, admin_email, metadata):
             
             if len(batch) >= 5:
                 send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': batch, 'skipMetadataUpdate': skip_meta})
-                print(f"📤 Sent {len(batch)} chapters.")
                 batch = []
-                time.sleep(1.0) # Be gentle
-        else:
-            print(f"⚠️ Failed content for Ch {chap['number']}")
-            
+                time.sleep(1.2) # تأخير لتجنب الحظر
+        
     if batch:
         send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': batch, 'skipMetadataUpdate': skip_meta})
-        print(f"📤 Sent final batch.")
+        print(f"📤 Final batch sent.")
 
 # ==========================================
 # Main Orchestrator
@@ -416,7 +382,7 @@ def worker_madara_list(url, admin_email, metadata):
 
 @app.route('/', methods=['GET'])
 def health_check():
-    return "ZEUS Scraper Service (Multi-Site Supported ⚡) is Running", 200
+    return "ZEUS Scraper Service is Running", 200
 
 @app.route('/scrape', methods=['POST'])
 def trigger_scrape():
@@ -429,25 +395,22 @@ def trigger_scrape():
     
     if not url: return jsonify({'message': 'No URL'}), 400
 
-    # Dispatcher
+    # توجيه الطلب حسب الدومين
     if 'rewayat.club' in url:
         meta = fetch_metadata_rewayat(url)
-        if not meta: return jsonify({'message': 'Failed metadata', 'error': 'Could not fetch metadata'}), 400
-        
+        if not meta: return jsonify({'message': 'Failed metadata'}), 400
         thread = threading.Thread(target=worker_rewayat_probe, args=(url, admin_email, meta))
         thread.daemon = True
         thread.start()
-        return jsonify({'message': 'Started Rewayat Probe', 'status': 'started'}), 200
+        return jsonify({'message': 'Started Rewayat Probe'}), 200
         
     elif 'ar-no.com' in url:
         meta = fetch_metadata_madara(url)
-        if not meta: return jsonify({'message': 'Failed metadata', 'error': 'Could not fetch metadata from Ar-Novel'}), 400
-        
-        # Proceed even if ID is missing, as we might scrape from HTML list
+        if not meta: return jsonify({'message': 'Failed metadata'}), 400
         thread = threading.Thread(target=worker_madara_list, args=(url, admin_email, meta))
         thread.daemon = True
         thread.start()
-        return jsonify({'message': 'Started Ar-Novel List Scraper', 'status': 'started'}), 200
+        return jsonify({'message': 'Started Ar-Novel Scraper'}), 200
 
     else:
         return jsonify({'message': 'Unsupported Domain'}), 400
