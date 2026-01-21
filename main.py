@@ -216,7 +216,7 @@ def fetch_metadata_madara(url):
                 if c.startswith('manga-id-'):
                     novel_id = c.replace('manga-id-', '')
 
-        print(f"🔍 Found Novel ID: {novel_id}")
+        print(f"Found Novel ID: {novel_id}")
 
         # الوصف
         desc_div = soup.find(class_='summary__content') or soup.find(class_='description-summary')
@@ -278,7 +278,7 @@ def fetch_chapter_list_madara(novel_id, novel_url=None):
                 soup = BeautifulSoup(res.content, 'html.parser')
                 chapters = parse_madara_chapters_from_html(soup)
         except Exception as e:
-            print(f"⚠️ AJAX endpoint failed: {e}")
+            print(f"AJAX endpoint failed: {e}")
 
     # محاولة 2: admin-ajax
     if not chapters and novel_id:
@@ -291,7 +291,7 @@ def fetch_chapter_list_madara(novel_id, novel_url=None):
                 chapters = parse_madara_chapters_from_html(soup)
         except: pass
             
-    # ✅ التعديل الجوهري: ترتيب الفصول من 1 فما فوق لضمان البدء من البداية
+    # التعديل الجوهري: ترتيب الفصول من 1 فما فوق لضمان البدء من البداية
     if chapters:
         chapters.sort(key=lambda x: x['number'])
     
@@ -330,18 +330,18 @@ def worker_madara_list(url, admin_email, metadata):
     all_chapters = fetch_chapter_list_madara(metadata.get('novel_id'), url)
     
     if not all_chapters:
-        print(f"⚠️ No chapters found for {metadata['title']}")
+        print(f"No chapters found for {metadata['title']}")
         return
 
     # الترتيب تم بالفعل في الدالة السابقة
-    print(f"📋 Processing {len(all_chapters)} chapters (Sorted Ascending).")
+    print(f"Processing {len(all_chapters)} chapters (Sorted Ascending).")
     
     batch = []
     for chap in all_chapters:
         if chap['number'] in existing_chapters:
             continue
             
-        print(f"📥 Scraping {metadata['title']} - Ch {chap['number']}...")
+        print(f"Scraping {metadata['title']} - Ch {chap['number']}...")
         content = scrape_chapter_madara(chap['url'])
         
         if content:
@@ -378,25 +378,28 @@ def trigger_scrape():
     
     if not url: return jsonify({'message': 'No URL'}), 400
 
+    # تم استخدام daemon=False لضمان عدم قتل الخيط فور انتهاء الطلب الرئيسي
+    # ملاحظة: في بيئات الاستضافة السحابية، يفضل استخدام Celery أو Redis للمهام الطويلة
     if 'rewayat.club' in url:
         meta = fetch_metadata_rewayat(url)
         if not meta: return jsonify({'message': 'Failed metadata'}), 400
         thread = threading.Thread(target=worker_rewayat_probe, args=(url, admin_email, meta))
-        thread.daemon = True
+        thread.daemon = False 
         thread.start()
-        return jsonify({'message': 'Started Rewayat Probe'}), 200
+        return jsonify({'message': 'Scraping started in background. You can close the app.'}), 200
         
     elif 'ar-no.com' in url:
         meta = fetch_metadata_madara(url)
         if not meta: return jsonify({'message': 'Failed metadata'}), 400
         thread = threading.Thread(target=worker_madara_list, args=(url, admin_email, meta))
-        thread.daemon = True
+        thread.daemon = False
         thread.start()
-        return jsonify({'message': 'Started Ar-Novel Scraper'}), 200
+        return jsonify({'message': 'Scraping started in background. You can close the app.'}), 200
 
     else:
         return jsonify({'message': 'Unsupported Domain'}), 400
 
 if __name__ == "__main__":
     port = int(os.environ.get('PORT', 8080))
-    app.run(host='0.0.0.0', port=port)
+    # استخدام threaded=True لضمان التعامل مع عدة طلبات في نفس الوقت
+    app.run(host='0.0.0.0', port=port, threaded=True)
