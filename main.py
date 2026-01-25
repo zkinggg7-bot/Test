@@ -1,4 +1,3 @@
-
 import os
 import json
 import time
@@ -9,6 +8,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from bs4 import BeautifulSoup
 from datetime import datetime
+from urllib.parse import urlparse
 
 # ==========================================
 # إعدادات التطبيق
@@ -26,18 +26,14 @@ NODE_BACKEND_URL = os.environ.get('NODE_BACKEND_URL', 'https://c-production-3db6
 # أدوات السحب المشتركة (Shared Scraper Tools)
 # ==========================================
 
-def get_headers(custom_user_agent=None):
-    """
-    تكوين الترويسة (Headers).
-    إذا تم تمرير User-Agent من الآيباد، نستخدمه هو حصراً لنطابق الجلسة.
-    """
+def get_headers(referer=None):
     headers = {
-        'User-Agent': custom_user_agent or 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
         'Accept-Language': 'ar,en-US;q=0.7,en;q=0.3',
-        # بعض المواقع تتطلب Referer
-        'Referer': 'https://google.com/' 
     }
+    if referer:
+        headers['Referer'] = referer
     return headers
 
 def fix_image_url(url, base_url='https://api.rewayat.club'):
@@ -97,16 +93,10 @@ def extract_from_nuxt(soup):
     except: pass
     return None
 
-def fetch_metadata_rewayat(url, cookies=None, user_agent=None):
+def fetch_metadata_rewayat(url):
     try:
-        # 🔥 استخدام الكوكيز والـ User-Agent القادم من الآيباد
-        print(f"Fetching Metadata with UA: {user_agent}")
-        response = requests.get(url, headers=get_headers(user_agent), cookies=cookies, timeout=15)
-        
-        if response.status_code != 200: 
-            print(f"Failed to fetch metadata. Status: {response.status_code}")
-            return None
-            
+        response = requests.get(url, headers=get_headers(), timeout=15)
+        if response.status_code != 200: return None
         soup = BeautifulSoup(response.content, 'html.parser')
         
         title_tag = soup.find('h1')
@@ -129,13 +119,11 @@ def fetch_metadata_rewayat(url, cookies=None, user_agent=None):
         print(f"Error rewayat metadata: {e}")
         return None
 
-def scrape_chapter_rewayat(novel_url, chapter_num, cookies=None, user_agent=None):
+def scrape_chapter_rewayat(novel_url, chapter_num):
     url = f"{novel_url.rstrip('/')}/{chapter_num}"
     try:
-        # 🔥 تمرير الجلسة لكل فصل
-        response = requests.get(url, headers=get_headers(user_agent), cookies=cookies, timeout=10)
+        response = requests.get(url, headers=get_headers(), timeout=10)
         if response.status_code != 200: return None, None
-        
         soup = BeautifulSoup(response.content, 'html.parser')
         paragraphs = soup.find_all('p')
         clean_paragraphs = [p.get_text(strip=True) for p in paragraphs if p.get_text(strip=True)]
@@ -153,7 +141,7 @@ def scrape_chapter_rewayat(novel_url, chapter_num, cookies=None, user_agent=None
         return title, text
     except: return None, None
 
-def worker_rewayat_probe(url, admin_email, metadata, cookies=None, user_agent=None):
+def worker_rewayat_probe(url, admin_email, metadata):
     existing_chapters = check_existing_chapters(metadata['title'])
     skip_meta = len(existing_chapters) > 0
     
@@ -170,7 +158,7 @@ def worker_rewayat_probe(url, admin_email, metadata, cookies=None, user_agent=No
             errors = 0
             continue
             
-        chap_title, content = scrape_chapter_rewayat(url, current_chapter, cookies, user_agent)
+        chap_title, content = scrape_chapter_rewayat(url, current_chapter)
         if content:
             errors = 0
             batch.append({'number': current_chapter, 'title': chap_title, 'content': content})
@@ -178,7 +166,7 @@ def worker_rewayat_probe(url, admin_email, metadata, cookies=None, user_agent=No
             if len(batch) >= 5:
                 send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': batch, 'skipMetadataUpdate': skip_meta})
                 batch = []
-                time.sleep(1) # تأخير بسيط لتجنب الحظر
+                time.sleep(1)
         else:
             errors += 1
             print(f"Failed Ch {current_chapter} ({errors}/15)")
@@ -188,20 +176,26 @@ def worker_rewayat_probe(url, admin_email, metadata, cookies=None, user_agent=No
         send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': batch, 'skipMetadataUpdate': skip_meta})
 
 # ==========================================
-# 🟢 2. Ar Novel (Madara) Logic - List Mode
+# 🟢 2. Madara Themes (Ar-Novel & Markaz Riwayat) - List Mode
 # ==========================================
 
-def fetch_metadata_madara(url, cookies=None, user_agent=None):
+def get_base_url(url):
+    """استخراج الرابط الأساسي (البروتوكول + الدومين)"""
+    parsed = urlparse(url)
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+def fetch_metadata_madara(url):
     try:
-        # 🔥 تمرير الجلسة
-        response = requests.get(url, headers=get_headers(user_agent), cookies=cookies, timeout=15)
+        response = requests.get(url, headers=get_headers(), timeout=15)
         if response.status_code != 200: return None
         soup = BeautifulSoup(response.content, 'html.parser')
         
+        # استخراج العنوان
         title_tag = soup.find(class_='post-title')
         title = title_tag.find('h1').get_text(strip=True) if title_tag else "Unknown"
         title = re.sub(r'\s*~.*$', '', title) 
 
+        # استخراج الغلاف
         cover = ""
         img_container = soup.find(class_='summary_image')
         if img_container:
@@ -213,7 +207,7 @@ def fetch_metadata_madara(url, cookies=None, user_agent=None):
             og_img = soup.find("meta", property="og:image")
             if og_img: cover = og_img["content"]
 
-        # Madara ID Extraction
+        # استخراج ID الرواية (هام لطلب AJAX)
         novel_id = None
         shortlink = soup.find("link", rel="shortlink")
         if shortlink:
@@ -230,9 +224,13 @@ def fetch_metadata_madara(url, cookies=None, user_agent=None):
                 if c.startswith('manga-id-'):
                     novel_id = c.replace('manga-id-', '')
 
+        print(f"Found Novel ID: {novel_id}")
+
+        # الوصف
         desc_div = soup.find(class_='summary__content') or soup.find(class_='description-summary')
         description = desc_div.get_text(separator="\n", strip=True) if desc_div else ""
 
+        # التصنيفات
         genres_content = soup.find(class_='genres-content')
         category = "عام"
         tags = []
@@ -250,7 +248,12 @@ def fetch_metadata_madara(url, cookies=None, user_agent=None):
         print(f"Error Madara Meta: {e}")
         return None
 
+def fetch_metadata_markaz(url):
+    """مخصص لمركز الروايات لضمان الدقة بناء على ملفاتهم"""
+    return fetch_metadata_madara(url) # الهيكل مطابق تقريباً لقالب مادارا القياسي
+
 def parse_madara_chapters_from_html(soup):
+    """تحليل الفصول من كود HTML"""
     chapters = []
     items = soup.find_all('li', class_='wp-manga-chapter')
     
@@ -259,8 +262,12 @@ def parse_madara_chapters_from_html(soup):
         if a:
             link = a.get('href')
             raw_title = a.get_text(strip=True)
+            
+            # استخراج الرقم
             num_match = re.search(r'(\d+)', raw_title)
             number = int(num_match.group(1)) if num_match else 0
+            
+            # تنظيف العنوان
             clean_title = re.sub(r'^\d+\s*[-–]\s*', '', raw_title).strip()
             
             if number > 0:
@@ -268,78 +275,95 @@ def parse_madara_chapters_from_html(soup):
     
     return chapters
 
-def fetch_chapter_list_madara(novel_id, novel_url=None, cookies=None, user_agent=None):
+def fetch_chapter_list_madara(novel_id, novel_url):
+    """جلب قائمة الفصول بالكامل (يعمل مع أي موقع مادارا)"""
     chapters = []
+    base_url = get_base_url(novel_url)
     
-    # محاولة 1: AJAX
+    # محاولة 1: AJAX القياسي لمادارا
     if novel_url:
         ajax_endpoint = f"{novel_url.rstrip('/')}/ajax/chapters/"
         try:
-            headers = get_headers(user_agent)
+            headers = get_headers()
             headers['X-Requested-With'] = 'XMLHttpRequest'
-            # 🔥 تمرير الجلسة في طلب الـ AJAX
-            res = requests.post(ajax_endpoint, headers=headers, cookies=cookies, timeout=20)
+            res = requests.post(ajax_endpoint, headers=headers, timeout=20)
             if res.status_code == 200:
                 soup = BeautifulSoup(res.content, 'html.parser')
                 chapters = parse_madara_chapters_from_html(soup)
+                print(f"✅ Chapters fetched via /ajax/chapters/ ({len(chapters)})")
         except Exception as e:
             print(f"AJAX endpoint failed: {e}")
 
-    # محاولة 2: admin-ajax (Fallback)
+    # محاولة 2: admin-ajax.php (الطريقة القديمة لمادارا)
     if not chapters and novel_id:
         try:
-            ajax_url = "https://ar-no.com/wp-admin/admin-ajax.php"
+            # هنا نستخدم الرابط الأساسي ديناميكياً بدلاً من تثبيته
+            admin_ajax_url = f"{base_url}/wp-admin/admin-ajax.php"
             data = {'action': 'manga_get_chapters', 'manga': novel_id}
-            # 🔥 تمرير الجلسة
-            res = requests.post(ajax_url, data=data, headers=get_headers(user_agent), cookies=cookies, timeout=20)
+            print(f"🔄 Trying admin-ajax at: {admin_ajax_url}")
+            res = requests.post(admin_ajax_url, data=data, headers=get_headers(novel_url), timeout=20)
             if res.status_code == 200:
                 soup = BeautifulSoup(res.content, 'html.parser')
                 chapters = parse_madara_chapters_from_html(soup)
-        except: pass
+                print(f"✅ Chapters fetched via admin-ajax ({len(chapters)})")
+        except Exception as e:
+            print(f"admin-ajax failed: {e}")
             
+    # ترتيب الفصول
     if chapters:
         chapters.sort(key=lambda x: x['number'])
     
     return chapters
 
-def scrape_chapter_madara(url, cookies=None, user_agent=None):
+def scrape_chapter_madara(url):
     try:
-        # 🔥 تمرير الجلسة
-        res = requests.get(url, headers=get_headers(user_agent), cookies=cookies, timeout=15)
+        res = requests.get(url, headers=get_headers(), timeout=15)
         if res.status_code != 200: return None
         soup = BeautifulSoup(res.content, 'html.parser')
         
-        container = soup.find(class_='text-left') or soup.find(class_='reading-content') or soup.find(class_='entry-content')
+        # البحث عن المحتوى في الكلاسات الشائعة لمادارا + الكلاسات الخاصة بمركز الروايات
+        container = soup.find(class_='reader-target') or \
+                    soup.find(class_='reading-content') or \
+                    soup.find(class_='text-left') or \
+                    soup.find(class_='text-right') or \
+                    soup.find(class_='entry-content')
             
         if container:
-            for bad in container.find_all(['div', 'script', 'style', 'input', 'ins', 'iframe']):
-                if bad.get('class') and any(c in ['code-block', 'adsbygoogle', 'pf-ad'] for c in bad.get('class')):
+            # تنظيف العناصر غير المرغوبة
+            for bad in container.find_all(['div', 'script', 'style', 'input', 'ins', 'iframe', 'button']):
+                # إزالة أزرار التنقل أو الإعلانات
+                if bad.get('class') and any(c in ['nav-links', 'code-block', 'adsbygoogle', 'pf-ad', 'wpmcr-under-title-row'] for c in bad.get('class')):
+                    bad.decompose()
+                # إزالة زر القارئ العائم
+                if bad.get('id') == 'reader-btn':
                     bad.decompose()
             
+            # إزالة حاويات التنقل المباشرة
             for nav in container.find_all('div', class_='nav-links'):
                 nav.decompose()
 
             text = container.get_text(separator="\n\n", strip=True)
             text = re.sub(r'\n{3,}', '\n\n', text)
             text = text.replace('اكمال القراءة', '')
+            text = text.replace('إعدادات القراءة', '') # تنظيف نص الزر إذا بقي
             return text
         return None
     except: return None
 
-def worker_madara_list(url, admin_email, metadata, cookies=None, user_agent=None):
+def worker_madara_list(url, admin_email, metadata):
     existing_chapters = check_existing_chapters(metadata['title'])
     skip_meta = len(existing_chapters) > 0
     
     if not skip_meta:
         send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': [], 'skipMetadataUpdate': False})
 
-    all_chapters = fetch_chapter_list_madara(metadata.get('novel_id'), url, cookies, user_agent)
+    all_chapters = fetch_chapter_list_madara(metadata.get('novel_id'), url)
     
     if not all_chapters:
         print(f"No chapters found for {metadata['title']}")
         return
 
-    print(f"Processing {len(all_chapters)} chapters.")
+    print(f"Processing {len(all_chapters)} chapters (Sorted Ascending).")
     
     batch = []
     for chap in all_chapters:
@@ -347,7 +371,7 @@ def worker_madara_list(url, admin_email, metadata, cookies=None, user_agent=None
             continue
             
         print(f"Scraping {metadata['title']} - Ch {chap['number']}...")
-        content = scrape_chapter_madara(chap['url'], cookies, user_agent)
+        content = scrape_chapter_madara(chap['url'])
         
         if content:
             batch.append({
@@ -359,7 +383,7 @@ def worker_madara_list(url, admin_email, metadata, cookies=None, user_agent=None
             if len(batch) >= 5:
                 send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': batch, 'skipMetadataUpdate': skip_meta})
                 batch = []
-                time.sleep(1.2)
+                time.sleep(1.2) # تأخير بسيط لتجنب الحظر
         
     if batch:
         send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': batch, 'skipMetadataUpdate': skip_meta})
@@ -372,7 +396,6 @@ def worker_madara_list(url, admin_email, metadata, cookies=None, user_agent=None
 def health_check():
     return "ZEUS Scraper Service is Running", 200
 
-# Endpoint القديم (للسحب المباشر بدون كوكيز)
 @app.route('/scrape', methods=['POST'])
 def trigger_scrape():
     auth_header = request.headers.get('Authorization')
@@ -384,45 +407,31 @@ def trigger_scrape():
     
     if not url: return jsonify({'message': 'No URL'}), 400
 
-    return start_scraping_logic(url, admin_email, None, None)
-
-# 🔥 Endpoint الجديد (للسحب المحمي مع الجلسة القادمة من الآيباد)
-@app.route('/scrape-protected', methods=['POST'])
-def trigger_protected_scrape():
-    auth_header = request.headers.get('Authorization')
-    if auth_header != API_SECRET: return jsonify({'message': 'Unauthorized'}), 401
-
-    data = request.json
-    url = data.get('url', '')
-    admin_email = data.get('adminEmail')
-    cookies = data.get('cookies') # 🔥 Dictionary of Cookies
-    user_agent = data.get('userAgent') # 🔥 User Agent
-    
-    if not url: return jsonify({'message': 'No URL'}), 400
-
-    print(f"Received Protected Scrape Request for: {url}")
-    return start_scraping_logic(url, admin_email, cookies, user_agent)
-
-def start_scraping_logic(url, admin_email, cookies, user_agent):
+    # توجيه الطلب بناءً على الدومين
     if 'rewayat.club' in url:
-        # تمرير الكوكيز لجلب الميتاداتا
-        meta = fetch_metadata_rewayat(url, cookies, user_agent)
+        meta = fetch_metadata_rewayat(url)
         if not meta: return jsonify({'message': 'Failed metadata'}), 400
-        
-        # تشغيل العامل في الخلفية مع الكوكيز
-        thread = threading.Thread(target=worker_rewayat_probe, args=(url, admin_email, meta, cookies, user_agent))
+        thread = threading.Thread(target=worker_rewayat_probe, args=(url, admin_email, meta))
         thread.daemon = False 
         thread.start()
-        return jsonify({'message': 'Protected Scraping started in background.'}), 200
+        return jsonify({'message': 'Scraping started (Rewayat Club).'}), 200
         
     elif 'ar-no.com' in url:
-        meta = fetch_metadata_madara(url, cookies, user_agent)
+        meta = fetch_metadata_madara(url)
         if not meta: return jsonify({'message': 'Failed metadata'}), 400
-        
-        thread = threading.Thread(target=worker_madara_list, args=(url, admin_email, meta, cookies, user_agent))
+        thread = threading.Thread(target=worker_madara_list, args=(url, admin_email, meta))
         thread.daemon = False
         thread.start()
-        return jsonify({'message': 'Protected Scraping started in background.'}), 200
+        return jsonify({'message': 'Scraping started (Ar-Novel).'}), 200
+
+    elif 'markazriwayat.com' in url:
+        # استخدام منطق مركز الروايات (وهو نفس منطق Madara مع تعديلات طفيفة)
+        meta = fetch_metadata_markaz(url)
+        if not meta: return jsonify({'message': 'Failed metadata'}), 400
+        thread = threading.Thread(target=worker_madara_list, args=(url, admin_email, meta))
+        thread.daemon = False
+        thread.start()
+        return jsonify({'message': 'Scraping started (Markaz Riwayat).'}), 200
 
     else:
         return jsonify({'message': 'Unsupported Domain'}), 400
