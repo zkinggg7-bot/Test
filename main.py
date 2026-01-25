@@ -204,24 +204,32 @@ def fetch_metadata_madara(url):
         if response.status_code != 200: return None
         soup = BeautifulSoup(response.content, 'html.parser')
         
-        # استخراج العنوان
+        # 1. استخراج العنوان
         title_tag = soup.find(class_='post-title')
         title = title_tag.find('h1').get_text(strip=True) if title_tag else "Unknown"
         title = re.sub(r'\s*~.*$', '', title) 
 
-        # استخراج الغلاف
+        # 2. استخراج الغلاف (تصحيح مشكلة الصورة البيضاء)
         cover = ""
-        img_container = soup.find(class_='summary_image')
-        if img_container:
-            img_tag = img_container.find('img')
-            if img_tag:
-                cover = img_tag.get('src') or img_tag.get('data-src') or img_tag.get('srcset', '').split(' ')[0]
         
+        # الأولوية الأولى: البحث عن صورة الميتا (لأنها دائماً الرابط الأصلي وبجودة عالية)
+        og_img = soup.find("meta", property="og:image")
+        if og_img: 
+            cover = og_img["content"]
+        
+        # الأولوية الثانية: البحث داخل عنصر الصورة مع مراعاة Lazy Load
         if not cover:
-            og_img = soup.find("meta", property="og:image")
-            if og_img: cover = og_img["content"]
+            img_container = soup.find(class_='summary_image')
+            if img_container:
+                img_tag = img_container.find('img')
+                if img_tag:
+                    # نأخذ data-src أولاً لأنه الرابط الحقيقي، ثم src
+                    cover = img_tag.get('data-src') or img_tag.get('src') or img_tag.get('srcset', '').split(' ')[0]
 
-        # استخراج ID الرواية (هام لطلب AJAX)
+        # تنظيف رابط الصورة في حال كان نسبياً
+        cover = fix_image_url(cover)
+
+        # 3. استخراج ID الرواية (هام لطلب AJAX)
         novel_id = None
         shortlink = soup.find("link", rel="shortlink")
         if shortlink:
@@ -242,11 +250,11 @@ def fetch_metadata_madara(url):
 
         print(f"Found Novel ID: {novel_id}")
 
-        # الوصف
+        # 4. الوصف
         desc_div = soup.find(class_='summary__content') or soup.find(class_='description-summary')
         description = desc_div.get_text(separator="\n", strip=True) if desc_div else ""
 
-        # التصنيفات
+        # 5. التصنيفات
         genres_content = soup.find(class_='genres-content')
         category = "عام"
         tags = []
