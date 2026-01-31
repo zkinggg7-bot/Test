@@ -50,7 +50,6 @@ def fix_image_url(url, base_url='https://api.rewayat.club'):
     if url.startswith('//'):
         return 'https:' + url
     elif url.startswith('/'):
-        # إذا كان الموقع هو novelfire نستخدم الدومين الخاص به
         if 'novelfire.net' in base_url:
             return 'https://novelfire.net' + url
         return base_url + url
@@ -395,7 +394,7 @@ def worker_madara_list(url, admin_email, metadata):
         send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': batch, 'skipMetadataUpdate': skip_meta})
 
 # ==========================================
-# 🟠 3. Novel Fire (novelfire.net) Logic - New Addition
+# 🟠 3. Novel Fire (novelfire.net) Logic
 # ==========================================
 
 def fetch_metadata_novelfire(url):
@@ -404,22 +403,18 @@ def fetch_metadata_novelfire(url):
         if response.status_code != 200: return None
         soup = BeautifulSoup(response.content, 'html.parser')
         
-        # استخراج العنوان من og:title أو وسم h1
         title_tag = soup.find("meta", property="og:title")
         title = title_tag["content"] if title_tag else soup.find('h1').get_text(strip=True)
         title = title.replace(' - Novel Fire', '').strip()
 
-        # استخراج الغلاف
         cover = ""
         og_img = soup.find("meta", property="og:image")
         if og_img: cover = og_img["content"]
         cover = fix_image_url(cover, base_url='https://novelfire.net')
 
-        # استخراج الوصف
         desc_div = soup.find('div', class_='description') or soup.find('div', id='novel-summary')
         description = desc_div.get_text(separator="\n\n", strip=True) if desc_div else ""
 
-        # التصنيفات
         tags = []
         genre_links = soup.select('.novel-genres a')
         for link in genre_links:
@@ -435,10 +430,9 @@ def fetch_metadata_novelfire(url):
         return None
 
 def fetch_chapter_list_novelfire(novel_url):
-    """جلب قائمة الفصول من صفحة الفصول الخاصة بـ Novel Fire"""
     chapters = []
-    # تحويل رابط الرواية إلى رابط قائمة الفصول
-    if not novel_url.endswith('/chapters'):
+    # التأكد من الذهاب لصفحة الفصول
+    if not novel_url.rstrip('/').endswith('/chapters'):
         list_url = novel_url.rstrip('/') + '/chapters'
     else:
         list_url = novel_url
@@ -448,28 +442,25 @@ def fetch_chapter_list_novelfire(novel_url):
         if res.status_code != 200: return []
         soup = BeautifulSoup(res.content, 'html.parser')
         
-        # البحث عن الفصول في قائمة <ul>
         items = soup.select('ul.chapter-list li')
         for item in items:
             a = item.find('a')
             if a:
-                link = 'https://novelfire.net' + a.get('href') if a.get('href').startswith('/') else a.get('href')
+                href = a.get('href', '')
+                link = 'https://novelfire.net' + href if href.startswith('/') else href
                 raw_title = a.get_text(strip=True)
                 
-                # استخراج الرقم من العنوان أو الرابط
                 num_match = re.search(r'chapter-(\d+)', link)
                 if not num_match: num_match = re.search(r'(\d+)', raw_title)
                 
                 number = int(num_match.group(1)) if num_match else 0
-                clean_title = raw_title.strip()
-                
                 if number > 0:
-                    chapters.append({'number': number, 'url': link, 'title': clean_title})
+                    chapters.append({'number': number, 'url': link, 'title': raw_title})
         
         chapters.sort(key=lambda x: x['number'])
         return chapters
     except Exception as e:
-        print(f"Error fetching NovelFire chapter list: {e}")
+        print(f"Error list NovelFire: {e}")
         return []
 
 def scrape_chapter_novelfire(url):
@@ -478,17 +469,13 @@ def scrape_chapter_novelfire(url):
         if res.status_code != 200: return None
         soup = BeautifulSoup(res.content, 'html.parser')
         
-        # محتوى الفصل في Novel Fire غالباً ما يكون داخل div بـ id "content" أو "chapter-content"
         container = soup.find('div', id='content') or soup.find('div', class_='chapter-content')
-        
         if container:
-            # حذف الإعلانات والعناصر غير النصية
             for bad in container.find_all(['div', 'script', 'style', 'ins', 'button']):
-                if 'ads' in (bad.get('class') or []) or 'nf-ads' in (bad.get('class') or []):
+                if bad.get('class') and ('ads' in str(bad.get('class'))):
                     bad.decompose()
 
             text = container.get_text(separator="\n\n", strip=True)
-            # تنظيف النصوص المتكررة الخاصة بالموقع
             text = re.sub(r'Read.*online.*now!', '', text)
             text = re.sub(r'\n{3,}', '\n\n', text)
             return text
@@ -504,7 +491,7 @@ def worker_novelfire_list(url, admin_email, metadata):
 
     all_chapters = fetch_chapter_list_novelfire(url)
     if not all_chapters:
-        print(f"No chapters found for {metadata['title']} on NovelFire")
+        print(f"No chapters found for {metadata['title']}")
         return
 
     batch = []
@@ -512,16 +499,10 @@ def worker_novelfire_list(url, admin_email, metadata):
         if chap['number'] in existing_chapters:
             continue
             
-        print(f"Scraping NovelFire: {metadata['title']} - Ch {chap['number']}...")
+        print(f"Scraping NovelFire: Ch {chap['number']}...")
         content = scrape_chapter_novelfire(chap['url'])
-        
         if content:
-            batch.append({
-                'number': chap['number'],
-                'title': chap['title'],
-                'content': content
-            })
-            
+            batch.append({'number': chap['number'], 'title': chap['title'], 'content': content})
             if len(batch) >= 5:
                 send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': batch, 'skipMetadataUpdate': skip_meta})
                 batch = []
@@ -536,7 +517,7 @@ def worker_novelfire_list(url, admin_email, metadata):
 
 @app.route('/', methods=['GET'])
 def health_check():
-    return "ZEUS Scraper Service with NovelFire Support is Running", 200
+    return "ZEUS Scraper Service is Running", 200
 
 @app.route('/scrape', methods=['POST'])
 def trigger_scrape():
@@ -549,11 +530,11 @@ def trigger_scrape():
     
     if not url: return jsonify({'message': 'No URL'}), 400
 
+    # التعديل الهام هنا: التأكد من فحص الرابط بدقة
     if 'rewayat.club' in url:
         meta = fetch_metadata_rewayat(url)
         if not meta: return jsonify({'message': 'Failed metadata'}), 400
         thread = threading.Thread(target=worker_rewayat_probe, args=(url, admin_email, meta))
-        thread.daemon = False 
         thread.start()
         return jsonify({'message': 'Scraping started (Rewayat Club).'}), 200
         
@@ -561,7 +542,6 @@ def trigger_scrape():
         meta = fetch_metadata_madara(url)
         if not meta: return jsonify({'message': 'Failed metadata'}), 400
         thread = threading.Thread(target=worker_madara_list, args=(url, admin_email, meta))
-        thread.daemon = False
         thread.start()
         return jsonify({'message': 'Scraping started (Ar-Novel).'}), 200
 
@@ -569,7 +549,6 @@ def trigger_scrape():
         meta = fetch_metadata_markaz(url)
         if not meta: return jsonify({'message': 'Failed metadata'}), 400
         thread = threading.Thread(target=worker_madara_list, args=(url, admin_email, meta))
-        thread.daemon = False
         thread.start()
         return jsonify({'message': 'Scraping started (Markaz Riwayat).'}), 200
 
@@ -577,7 +556,6 @@ def trigger_scrape():
         meta = fetch_metadata_novelfire(url)
         if not meta: return jsonify({'message': 'Failed metadata'}), 400
         thread = threading.Thread(target=worker_novelfire_list, args=(url, admin_email, meta))
-        thread.daemon = False
         thread.start()
         return jsonify({'message': 'Scraping started (Novel Fire).'}), 200
 
