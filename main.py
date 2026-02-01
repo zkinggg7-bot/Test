@@ -430,6 +430,7 @@ def fetch_metadata_novelfire(url):
         return None
 
 def fetch_chapter_list_novelfire(novel_url):
+    """سحب جميع الفصول من NovelFire مع دعم التنقل بين الصفحات (Pagination)"""
     chapters = []
     # التأكد من الذهاب لصفحة الفصول
     if not novel_url.rstrip('/').endswith('/chapters'):
@@ -438,29 +439,54 @@ def fetch_chapter_list_novelfire(novel_url):
         list_url = novel_url
 
     try:
-        res = requests.get(list_url, headers=get_headers(), timeout=15)
-        if res.status_code != 200: return []
-        soup = BeautifulSoup(res.content, 'html.parser')
+        # البدء من الصفحة الأولى
+        current_page = 1
         
-        items = soup.select('ul.chapter-list li')
-        for item in items:
-            a = item.find('a')
-            if a:
-                href = a.get('href', '')
-                link = 'https://novelfire.net' + href if href.startswith('/') else href
-                raw_title = a.get_text(strip=True)
+        while True:
+            # تكوين رابط الصفحة الحالية
+            page_url = f"{list_url}?page={current_page}"
+            print(f"🔍 Fetching chapters from NovelFire Page: {current_page}")
+            
+            res = requests.get(page_url, headers=get_headers(), timeout=15)
+            if res.status_code != 200: break
+            
+            soup = BeautifulSoup(res.content, 'html.parser')
+            
+            # استخراج الفصول من الصفحة الحالية
+            items = soup.select('ul.chapter-list li')
+            if not items:
+                break # لا توجد فصول، توقف
                 
-                num_match = re.search(r'chapter-(\d+)', link)
-                if not num_match: num_match = re.search(r'(\d+)', raw_title)
-                
-                number = int(num_match.group(1)) if num_match else 0
-                if number > 0:
-                    chapters.append({'number': number, 'url': link, 'title': raw_title})
-        
+            for item in items:
+                a = item.find('a')
+                if a:
+                    href = a.get('href', '')
+                    link = 'https://novelfire.net' + href if href.startswith('/') else href
+                    raw_title = a.get_text(strip=True)
+                    
+                    # استخراج رقم الفصل من الرابط أو العنوان
+                    num_match = re.search(r'chapter-(\d+)', link)
+                    if not num_match: num_match = re.search(r'(\d+)', raw_title)
+                    
+                    number = int(num_match.group(1)) if num_match else 0
+                    if number > 0:
+                        chapters.append({'number': number, 'url': link, 'title': raw_title})
+            
+            # التحقق مما إذا كانت هناك صفحة تالية (Next)
+            # نبحث عن زر Next في Pagination
+            next_btn = soup.select_one('li.page-item a[rel="next"]')
+            if next_btn:
+                current_page += 1
+                time.sleep(0.5) # تأخير بسيط لتجنب الضغط على السيرفر
+            else:
+                break # لا توجد صفحة تالية، انتهينا
+
+        # ترتيب جميع الفصول المجمعة من كل الصفحات
         chapters.sort(key=lambda x: x['number'])
+        print(f"✅ Total chapters found across all pages: {len(chapters)}")
         return chapters
     except Exception as e:
-        print(f"Error list NovelFire: {e}")
+        print(f"Error list NovelFire with pagination: {e}")
         return []
 
 def scrape_chapter_novelfire(url):
