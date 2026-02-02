@@ -715,6 +715,130 @@ def worker_wuxiabox_list(url, admin_email, metadata):
         send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': batch, 'skipMetadataUpdate': skip_meta})
 
 # ==========================================
+# 🔴 5. FreeWebNovel Logic
+# ==========================================
+
+def fetch_metadata_freewebnovel(url):
+    try:
+        response = requests.get(url, headers=get_headers(), timeout=15)
+        if response.status_code != 200: return None
+        soup = BeautifulSoup(response.content, 'html.parser')
+        
+        # Title
+        title_tag = soup.find("meta", property="og:title")
+        title = title_tag["content"] if title_tag else soup.select_one('h1.tit').get_text(strip=True)
+        # Remove site suffix
+        title = title.split(' - ')[0].strip()
+
+        # Cover
+        cover_tag = soup.find("meta", property="og:image")
+        cover = cover_tag["content"] if cover_tag else ""
+        
+        # Description
+        desc_div = soup.select_one('.m-desc .txt .inner')
+        if desc_div:
+            description = desc_div.get_text(separator="\n\n", strip=True)
+        else:
+            desc_meta = soup.find("meta", property="og:description")
+            description = desc_meta["content"] if desc_meta else ""
+
+        # Status
+        status = "مستمرة"
+        status_node = soup.select_one('.m-imgtxt .item span.s3 a')
+        if status_node and 'Completed' in status_node.get_text():
+            status = "مكتملة"
+
+        # Categories
+        tags = []
+        genre_links = soup.select('.m-imgtxt .item a[href*="genre"]')
+        for link in genre_links:
+            tags.append(link.get_text(strip=True))
+        category = tags[0] if tags else "عام"
+
+        return {
+            'title': title, 'description': description, 'cover': cover,
+            'status': status, 'category': category, 'tags': tags
+        }
+    except Exception as e:
+        print(f"Error Freewebnovel Meta: {e}")
+        return None
+
+def fetch_chapter_list_freewebnovel(url):
+    chapters = []
+    try:
+        response = requests.get(url, headers=get_headers(), timeout=15)
+        if response.status_code != 200: return []
+        soup = BeautifulSoup(response.content, 'html.parser')
+        
+        # List items
+        items = soup.select('ul#idData li a')
+        for a in items:
+            href = a.get('href')
+            full_link = urljoin('https://freewebnovel.com', href)
+            title = a.get('title') or a.get_text(strip=True)
+            
+            # Extract number
+            match = re.search(r'Chapter\s+(\d+)', title, re.IGNORECASE)
+            if match:
+                num = int(match.group(1))
+                chapters.append({'number': num, 'url': full_link, 'title': title})
+        
+        # Deduplicate and sort
+        unique = {c['number']: c for c in chapters}.values()
+        chapters = list(unique)
+        chapters.sort(key=lambda x: x['number'])
+        return chapters
+    except Exception as e:
+        print(f"Error Freewebnovel List: {e}")
+        return []
+
+def scrape_chapter_freewebnovel(url):
+    try:
+        response = requests.get(url, headers=get_headers(), timeout=15)
+        if response.status_code != 200: return None
+        soup = BeautifulSoup(response.content, 'html.parser')
+        
+        content_div = soup.select_one('.m-read .txt')
+        if not content_div: return None
+        
+        # Clean specific trash found in file
+        for bad in content_div.find_all(['script', 'style', 'subtxt', 'div', 'center']):
+            bad.decompose()
+            
+        # Clean text
+        text = content_div.get_text(separator="\n\n", strip=True)
+        # Remove common ads in text if any remain
+        text = re.sub(r'Find.*novels.*at.*freewebnovel.*', '', text, flags=re.IGNORECASE)
+        return text
+    except: return None
+
+def worker_freewebnovel_list(url, admin_email, metadata):
+    existing_chapters = check_existing_chapters(metadata['title'])
+    skip_meta = len(existing_chapters) > 0
+    
+    if not skip_meta:
+        send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': [], 'skipMetadataUpdate': False})
+
+    all_chapters = fetch_chapter_list_freewebnovel(url)
+    
+    batch = []
+    for chap in all_chapters:
+        if chap['number'] in existing_chapters: continue
+        
+        print(f"Scraping Freewebnovel: Ch {chap['number']}...")
+        content = scrape_chapter_freewebnovel(chap['url'])
+        
+        if content:
+            batch.append({'number': chap['number'], 'title': chap['title'], 'content': content})
+            if len(batch) >= 5:
+                send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': batch, 'skipMetadataUpdate': skip_meta})
+                batch = []
+                time.sleep(1)
+                
+    if batch:
+        send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': batch, 'skipMetadataUpdate': skip_meta})
+
+# ==========================================
 # Main Orchestrator
 # ==========================================
 
@@ -768,6 +892,13 @@ def trigger_scrape():
         thread = threading.Thread(target=worker_wuxiabox_list, args=(url, admin_email, meta))
         thread.start()
         return jsonify({'message': 'Scraping started (WuxiaBox/Spot).'}), 200
+
+    elif 'freewebnovel.com' in url:
+        meta = fetch_metadata_freewebnovel(url)
+        if not meta: return jsonify({'message': 'Failed metadata'}), 400
+        thread = threading.Thread(target=worker_freewebnovel_list, args=(url, admin_email, meta))
+        thread.start()
+        return jsonify({'message': 'Scraping started (FreeWebNovel).'}), 200
 
     else:
         return jsonify({'message': 'Unsupported Domain'}), 400
