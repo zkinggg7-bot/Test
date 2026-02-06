@@ -30,6 +30,18 @@ NODE_BACKEND_URL = os.environ.get('NODE_BACKEND_URL', 'https://c-production-3db6
 MARKAZ_COOKIES = 'wordpress_logged_in_198f6e9e82ba200a53325105f201ddc5=53a8cc0077488fb5a321840b4e1f18e7%7C1770510651%7CZmUj9XvN1Cem8SZvUhUfgdlhjnaNrDJEG5fx8iqM53y%7C24bb480a43ebe89e75de989f9afd0f4846079186c93e064185de2a015e37df0f'
 
 # ==========================================
+# 🔄 GLOBAL SERVER-SIDE SCHEDULER STATE
+# ==========================================
+SCHEDULER_CONFIG = {
+    'active': False,
+    'interval_seconds': 86400, # Default 24h
+    'next_run': 0,
+    'last_run': 0,
+    'status': 'idle',
+    'admin_email': 'system@auto'
+}
+
+# ==========================================
 # أدوات السحب المشتركة (Shared Scraper Tools)
 # ==========================================
 
@@ -954,12 +966,108 @@ def worker_freewebnovel_list(url, admin_email, metadata):
         send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': batch, 'skipMetadataUpdate': True})
 
 # ==========================================
-# Main Orchestrator
+# 🔄 MAIN AUTOMATIC SCHEDULER LOGIC
+# ==========================================
+
+def perform_single_scrape(url, admin_email):
+    """Executes scraping for a single URL without creating new threads (synchronous for scheduler)"""
+    try:
+        if not url: return
+        print(f"⏰ Scheduler Checking: {url}")
+        
+        if 'rewayat.club' in url:
+            meta = fetch_metadata_rewayat(url)
+            if meta: worker_rewayat_probe(url, admin_email, meta)
+        elif 'ar-no.com' in url:
+            meta = fetch_metadata_madara(url)
+            if meta: worker_madara_list(url, admin_email, meta)
+        elif 'markazriwayat.com' in url:
+            meta = fetch_metadata_madara(url)
+            if meta: worker_madara_list(url, admin_email, meta)
+        elif 'novelfire.net' in url:
+            meta = fetch_metadata_novelfire(url)
+            if meta: worker_novelfire_list(url, admin_email, meta)
+        elif 'wuxiabox.com' in url or 'wuxiaspot.com' in url:
+            meta = fetch_metadata_wuxiabox(url)
+            if meta: worker_wuxiabox_list(url, admin_email, meta)
+        elif 'freewebnovel.com' in url:
+            meta = fetch_metadata_freewebnovel(url)
+            if meta: worker_freewebnovel_list(url, admin_email, meta)
+    except Exception as e:
+        print(f"⚠️ Scheduler Error for {url}: {e}")
+
+def scheduler_loop():
+    """Background thread that runs forever"""
+    while True:
+        try:
+            now = time.time()
+            if SCHEDULER_CONFIG['active'] and now >= SCHEDULER_CONFIG['next_run']:
+                SCHEDULER_CONFIG['status'] = 'running'
+                print("🚀 [Scheduler] Starting Auto Update Job...")
+                
+                # 1. Fetch Watchlist from Node.js using API Key
+                try:
+                    headers = {'x-api-secret': API_SECRET}
+                    res = requests.get(f"{NODE_BACKEND_URL}/api/admin/watchlist", headers=headers, timeout=30)
+                    if res.status_code == 200:
+                        watchlist = res.json()
+                        print(f"📋 [Scheduler] Found {len(watchlist)} novels.")
+                        
+                        for item in watchlist:
+                            if item.get('sourceUrl') and item.get('status') == 'ongoing':
+                                perform_single_scrape(item['sourceUrl'], SCHEDULER_CONFIG['admin_email'])
+                                time.sleep(2) # Politeness delay
+                        
+                        print("✅ [Scheduler] Job Completed.")
+                    else:
+                        print(f"❌ [Scheduler] Failed to fetch watchlist: HTTP {res.status_code}")
+                except Exception as req_err:
+                    print(f"❌ [Scheduler] Connection Error: {req_err}")
+
+                # Update next run time
+                SCHEDULER_CONFIG['last_run'] = now
+                SCHEDULER_CONFIG['next_run'] = now + SCHEDULER_CONFIG['interval_seconds']
+                SCHEDULER_CONFIG['status'] = 'idle'
+            
+            time.sleep(5) # Check every 5 seconds
+        except Exception as e:
+            print(f"🔥 [Scheduler] Critical Loop Error: {e}")
+            time.sleep(60)
+
+# Start Scheduler Thread immediately
+scheduler_thread = threading.Thread(target=scheduler_loop, daemon=True)
+scheduler_thread.start()
+
+# ==========================================
+# Main Routes
 # ==========================================
 
 @app.route('/', methods=['GET'])
 def health_check():
-    return "ZEUS Scraper Service is Running", 200
+    return "ZEUS Scraper Service is Running (Scheduler Active)", 200
+
+@app.route('/scheduler/config', methods=['POST'])
+def configure_scheduler():
+    auth_header = request.headers.get('Authorization')
+    if auth_header != API_SECRET: return jsonify({'message': 'Unauthorized'}), 401
+    
+    data = request.json
+    SCHEDULER_CONFIG['active'] = data.get('active', False)
+    SCHEDULER_CONFIG['interval_seconds'] = int(data.get('interval', 86400))
+    SCHEDULER_CONFIG['admin_email'] = data.get('adminEmail', 'system@auto')
+    
+    # If activating, set next run immediately if not set
+    if SCHEDULER_CONFIG['active'] and SCHEDULER_CONFIG['next_run'] < time.time():
+        SCHEDULER_CONFIG['next_run'] = time.time() + 5 # Run in 5 seconds
+        
+    return jsonify({
+        'message': 'Scheduler Updated',
+        'config': SCHEDULER_CONFIG
+    })
+
+@app.route('/scheduler/status', methods=['GET'])
+def get_scheduler_status():
+    return jsonify(SCHEDULER_CONFIG)
 
 @app.route('/scrape', methods=['POST'])
 def trigger_scrape():
@@ -973,51 +1081,39 @@ def trigger_scrape():
         
         if not url: return jsonify({'message': 'No URL provided'}), 400
 
-        # Ensure URL is clean
+        # Run logic in thread
         if 'rewayat.club' in url:
             meta = fetch_metadata_rewayat(url)
-            if not meta: return jsonify({'message': 'Failed metadata'}), 400
-            thread = threading.Thread(target=worker_rewayat_probe, args=(url, admin_email, meta))
-            thread.start()
-            return jsonify({'message': 'Scraping started (Rewayat Club).'}), 200
-            
+            if meta: 
+                threading.Thread(target=worker_rewayat_probe, args=(url, admin_email, meta)).start()
+                return jsonify({'message': 'Started Rewayat Club'}), 200
         elif 'ar-no.com' in url:
             meta = fetch_metadata_madara(url)
-            if not meta: return jsonify({'message': 'Failed metadata'}), 400
-            thread = threading.Thread(target=worker_madara_list, args=(url, admin_email, meta))
-            thread.start()
-            return jsonify({'message': 'Scraping started (Ar-Novel).'}), 200
-
+            if meta:
+                threading.Thread(target=worker_madara_list, args=(url, admin_email, meta)).start()
+                return jsonify({'message': 'Started Ar-Novel'}), 200
         elif 'markazriwayat.com' in url:
             meta = fetch_metadata_markaz(url)
-            if not meta: return jsonify({'message': 'Failed metadata'}), 400
-            thread = threading.Thread(target=worker_madara_list, args=(url, admin_email, meta))
-            thread.start()
-            return jsonify({'message': 'Scraping started (Markaz Riwayat).'}), 200
-
+            if meta:
+                threading.Thread(target=worker_madara_list, args=(url, admin_email, meta)).start()
+                return jsonify({'message': 'Started Markaz'}), 200
         elif 'novelfire.net' in url:
             meta = fetch_metadata_novelfire(url)
-            if not meta: return jsonify({'message': 'Failed metadata'}), 400
-            thread = threading.Thread(target=worker_novelfire_list, args=(url, admin_email, meta))
-            thread.start()
-            return jsonify({'message': 'Scraping started (Novel Fire).'}), 200
-
+            if meta:
+                threading.Thread(target=worker_novelfire_list, args=(url, admin_email, meta)).start()
+                return jsonify({'message': 'Started Novel Fire'}), 200
         elif 'wuxiabox.com' in url or 'wuxiaspot.com' in url:
             meta = fetch_metadata_wuxiabox(url)
-            if not meta: return jsonify({'message': 'Failed metadata'}), 400
-            thread = threading.Thread(target=worker_wuxiabox_list, args=(url, admin_email, meta))
-            thread.start()
-            return jsonify({'message': 'Scraping started (WuxiaBox/Spot).'}), 200
-
+            if meta:
+                threading.Thread(target=worker_wuxiabox_list, args=(url, admin_email, meta)).start()
+                return jsonify({'message': 'Started WuxiaBox'}), 200
         elif 'freewebnovel.com' in url:
             meta = fetch_metadata_freewebnovel(url)
-            if not meta: return jsonify({'message': 'Failed metadata'}), 400
-            thread = threading.Thread(target=worker_freewebnovel_list, args=(url, admin_email, meta))
-            thread.start()
-            return jsonify({'message': 'Scraping started (FreeWebNovel).'}), 200
-
-        else:
-            return jsonify({'message': 'Unsupported Domain'}), 400
+            if meta:
+                threading.Thread(target=worker_freewebnovel_list, args=(url, admin_email, meta)).start()
+                return jsonify({'message': 'Started FreeWebNovel'}), 200
+        
+        return jsonify({'message': 'Unsupported or Failed'}), 400
             
     except Exception as e:
         error_trace = traceback.format_exc()
