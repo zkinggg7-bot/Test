@@ -5,6 +5,7 @@ import time
 import threading
 import requests
 import re
+import traceback
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from bs4 import BeautifulSoup
@@ -945,57 +946,63 @@ def trigger_scrape():
     auth_header = request.headers.get('Authorization')
     if auth_header != API_SECRET: return jsonify({'message': 'Unauthorized'}), 401
 
-    data = request.json
-    url = data.get('url', '').strip()
-    admin_email = data.get('adminEmail')
-    
-    if not url: return jsonify({'message': 'No URL provided'}), 400
-
-    # Ensure URL is clean
-    if 'rewayat.club' in url:
-        meta = fetch_metadata_rewayat(url)
-        if not meta: return jsonify({'message': 'Failed metadata'}), 400
-        thread = threading.Thread(target=worker_rewayat_probe, args=(url, admin_email, meta))
-        thread.start()
-        return jsonify({'message': 'Scraping started (Rewayat Club).'}), 200
+    try:
+        data = request.json
+        url = data.get('url', '').strip()
+        admin_email = data.get('adminEmail')
         
-    elif 'ar-no.com' in url:
-        meta = fetch_metadata_madara(url)
-        if not meta: return jsonify({'message': 'Failed metadata'}), 400
-        thread = threading.Thread(target=worker_madara_list, args=(url, admin_email, meta))
-        thread.start()
-        return jsonify({'message': 'Scraping started (Ar-Novel).'}), 200
+        if not url: return jsonify({'message': 'No URL provided'}), 400
 
-    elif 'markazriwayat.com' in url:
-        meta = fetch_metadata_markaz(url)
-        if not meta: return jsonify({'message': 'Failed metadata'}), 400
-        thread = threading.Thread(target=worker_madara_list, args=(url, admin_email, meta))
-        thread.start()
-        return jsonify({'message': 'Scraping started (Markaz Riwayat).'}), 200
+        # Ensure URL is clean
+        if 'rewayat.club' in url:
+            meta = fetch_metadata_rewayat(url)
+            if not meta: return jsonify({'message': 'Failed metadata'}), 400
+            thread = threading.Thread(target=worker_rewayat_probe, args=(url, admin_email, meta))
+            thread.start()
+            return jsonify({'message': 'Scraping started (Rewayat Club).'}), 200
+            
+        elif 'ar-no.com' in url:
+            meta = fetch_metadata_madara(url)
+            if not meta: return jsonify({'message': 'Failed metadata'}), 400
+            thread = threading.Thread(target=worker_madara_list, args=(url, admin_email, meta))
+            thread.start()
+            return jsonify({'message': 'Scraping started (Ar-Novel).'}), 200
 
-    elif 'novelfire.net' in url:
-        meta = fetch_metadata_novelfire(url)
-        if not meta: return jsonify({'message': 'Failed metadata'}), 400
-        thread = threading.Thread(target=worker_novelfire_list, args=(url, admin_email, meta))
-        thread.start()
-        return jsonify({'message': 'Scraping started (Novel Fire).'}), 200
+        elif 'markazriwayat.com' in url:
+            meta = fetch_metadata_markaz(url)
+            if not meta: return jsonify({'message': 'Failed metadata'}), 400
+            thread = threading.Thread(target=worker_madara_list, args=(url, admin_email, meta))
+            thread.start()
+            return jsonify({'message': 'Scraping started (Markaz Riwayat).'}), 200
 
-    elif 'wuxiabox.com' in url or 'wuxiaspot.com' in url:
-        meta = fetch_metadata_wuxiabox(url)
-        if not meta: return jsonify({'message': 'Failed metadata'}), 400
-        thread = threading.Thread(target=worker_wuxiabox_list, args=(url, admin_email, meta))
-        thread.start()
-        return jsonify({'message': 'Scraping started (WuxiaBox/Spot).'}), 200
+        elif 'novelfire.net' in url:
+            meta = fetch_metadata_novelfire(url)
+            if not meta: return jsonify({'message': 'Failed metadata'}), 400
+            thread = threading.Thread(target=worker_novelfire_list, args=(url, admin_email, meta))
+            thread.start()
+            return jsonify({'message': 'Scraping started (Novel Fire).'}), 200
 
-    elif 'freewebnovel.com' in url:
-        meta = fetch_metadata_freewebnovel(url)
-        if not meta: return jsonify({'message': 'Failed metadata'}), 400
-        thread = threading.Thread(target=worker_freewebnovel_list, args=(url, admin_email, meta))
-        thread.start()
-        return jsonify({'message': 'Scraping started (FreeWebNovel).'}), 200
+        elif 'wuxiabox.com' in url or 'wuxiaspot.com' in url:
+            meta = fetch_metadata_wuxiabox(url)
+            if not meta: return jsonify({'message': 'Failed metadata'}), 400
+            thread = threading.Thread(target=worker_wuxiabox_list, args=(url, admin_email, meta))
+            thread.start()
+            return jsonify({'message': 'Scraping started (WuxiaBox/Spot).'}), 200
 
-    else:
-        return jsonify({'message': 'Unsupported Domain'}), 400
+        elif 'freewebnovel.com' in url:
+            meta = fetch_metadata_freewebnovel(url)
+            if not meta: return jsonify({'message': 'Failed metadata'}), 400
+            thread = threading.Thread(target=worker_freewebnovel_list, args=(url, admin_email, meta))
+            thread.start()
+            return jsonify({'message': 'Scraping started (FreeWebNovel).'}), 200
+
+        else:
+            return jsonify({'message': 'Unsupported Domain'}), 400
+            
+    except Exception as e:
+        error_trace = traceback.format_exc()
+        print(f"Server Error: {error_trace}")
+        return jsonify({'message': 'Internal Server Error', 'details': str(e), 'trace': error_trace}), 500
 
 if __name__ == "__main__":
     port = int(os.environ.get('PORT', 8080))
