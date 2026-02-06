@@ -1,3 +1,4 @@
+
 import os
 import json
 import time
@@ -127,9 +128,14 @@ def fetch_metadata_rewayat(url):
         desc_div = soup.find(class_='text-pre-line') or soup.find('div', class_='v-card__text')
         description = desc_div.get_text(separator="\n\n", strip=True) if desc_div else ""
         
+        # Check Status
+        status = "مستمرة"
+        # Rewayat Club usually puts status in specific badges, need to check if they have 'Completed'
+        # Defaulting to ongoing for now unless specific indicator found
+        
         return {
             'title': title, 'description': description, 'cover': cover_url,
-            'status': "مستمرة", 'category': "عام", 'tags': []
+            'status': status, 'category': "عام", 'tags': [], 'sourceUrl': url
         }
     except Exception as e:
         print(f"Error rewayat metadata: {e}")
@@ -161,8 +167,8 @@ def worker_rewayat_probe(url, admin_email, metadata):
     existing_chapters = check_existing_chapters(metadata['title'])
     skip_meta = len(existing_chapters) > 0
     
-    if not skip_meta:
-        send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': [], 'skipMetadataUpdate': False})
+    # Send initial meta update (always send sourceUrl and status)
+    send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': [], 'skipMetadataUpdate': False})
 
     current_chapter = 1
     errors = 0
@@ -180,7 +186,7 @@ def worker_rewayat_probe(url, admin_email, metadata):
             batch.append({'number': current_chapter, 'title': chap_title, 'content': content})
             print(f"Fetched Ch {current_chapter}")
             if len(batch) >= 5:
-                send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': batch, 'skipMetadataUpdate': skip_meta})
+                send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': batch, 'skipMetadataUpdate': True})
                 batch = []
                 time.sleep(1)
         else:
@@ -189,7 +195,7 @@ def worker_rewayat_probe(url, admin_email, metadata):
         current_chapter += 1
         
     if batch:
-        send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': batch, 'skipMetadataUpdate': skip_meta})
+        send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': batch, 'skipMetadataUpdate': True})
 
 # ==========================================
 # 🟢 2. Madara Themes (Ar-Novel & Markaz Riwayat)
@@ -260,10 +266,20 @@ def fetch_metadata_madara(url):
             tags = [a.get_text(strip=True) for a in links]
             if tags: category = tags[0]
 
+        # Check Status in Madara
+        status = "مستمرة"
+        status_terms = soup.find_all('div', class_='post-status')
+        if status_terms:
+            for st in status_terms:
+                txt = st.get_text(strip=True).lower()
+                if 'completed' in txt or 'مكتملة' in txt:
+                    status = "مكتملة"
+                    break
+
         return {
             'title': title, 'description': description, 'cover': cover,
-            'status': 'مستمرة', 'category': category, 'tags': tags,
-            'novel_id': novel_id
+            'status': status, 'category': category, 'tags': tags,
+            'novel_id': novel_id, 'sourceUrl': url
         }
     except Exception as e:
         print(f"Error Madara Meta: {e}")
@@ -364,8 +380,8 @@ def worker_madara_list(url, admin_email, metadata):
     existing_chapters = check_existing_chapters(metadata['title'])
     skip_meta = len(existing_chapters) > 0
     
-    if not skip_meta:
-        send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': [], 'skipMetadataUpdate': False})
+    # Always update meta to sync status and URL
+    send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': [], 'skipMetadataUpdate': False})
 
     all_chapters = fetch_chapter_list_madara(metadata.get('novel_id'), url)
     
@@ -391,12 +407,12 @@ def worker_madara_list(url, admin_email, metadata):
             })
             
             if len(batch) >= 5:
-                send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': batch, 'skipMetadataUpdate': skip_meta})
+                send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': batch, 'skipMetadataUpdate': True})
                 batch = []
                 time.sleep(1.5)
         
     if batch:
-        send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': batch, 'skipMetadataUpdate': skip_meta})
+        send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': batch, 'skipMetadataUpdate': True})
 
 # ==========================================
 # 🟠 3. Novel Fire (novelfire.net) Logic
@@ -426,9 +442,16 @@ def fetch_metadata_novelfire(url):
             tags.append(link.get_text(strip=True))
         category = tags[0] if tags else "عام"
 
+        # 🔥🔥 STATUS CHECK - NOVEL FIRE SPECIFIC 🔥🔥
+        # Looking for: <strong class="completed">Completed</strong>
+        status = "مستمرة"
+        completed_tag = soup.find('strong', class_='completed')
+        if completed_tag and 'Completed' in completed_tag.get_text(strip=True):
+            status = "مكتملة"
+
         return {
             'title': title, 'description': description, 'cover': cover,
-            'status': 'مستمرة', 'category': category, 'tags': tags
+            'status': status, 'category': category, 'tags': tags, 'sourceUrl': url
         }
     except Exception as e:
         print(f"Error NovelFire Meta: {e}")
@@ -517,8 +540,8 @@ def worker_novelfire_list(url, admin_email, metadata):
     existing_chapters = check_existing_chapters(metadata['title'])
     skip_meta = len(existing_chapters) > 0
     
-    if not skip_meta:
-        send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': [], 'skipMetadataUpdate': False})
+    # Always update metadata to sync status (Completed) and sourceUrl
+    send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': [], 'skipMetadataUpdate': False})
 
     all_chapters = fetch_chapter_list_novelfire(url)
     if not all_chapters:
@@ -535,12 +558,12 @@ def worker_novelfire_list(url, admin_email, metadata):
         if content:
             batch.append({'number': chap['number'], 'title': chap['title'], 'content': content})
             if len(batch) >= 5:
-                send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': batch, 'skipMetadataUpdate': skip_meta})
+                send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': batch, 'skipMetadataUpdate': True})
                 batch = []
                 time.sleep(1)
         
     if batch:
-        send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': batch, 'skipMetadataUpdate': skip_meta})
+        send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': batch, 'skipMetadataUpdate': True})
 
 # ==========================================
 # 🔵 4. WuxiaBox / WuxiaSpot Logic
@@ -583,12 +606,15 @@ def fetch_metadata_wuxiabox(url):
             category = cat_tag.get_text(strip=True)
 
         status_tag = soup.select_one('.header-stats strong')
-        status = status_tag.get_text(strip=True) if status_tag else "مستمرة"
+        status = "مستمرة"
+        if status_tag:
+            txt = status_tag.get_text(strip=True).lower()
+            if 'completed' in txt: status = "مكتملة"
 
         return {
             'title': title, 'description': description, 'cover': cover,
             'status': status, 'category': category, 'tags': tags,
-            'base_url': base_url 
+            'base_url': base_url, 'sourceUrl': url
         }
     except Exception as e:
         print(f"Error WuxiaBox Meta: {e}")
@@ -688,8 +714,7 @@ def worker_wuxiabox_list(url, admin_email, metadata):
     existing_chapters = check_existing_chapters(metadata['title'])
     skip_meta = len(existing_chapters) > 0
     
-    if not skip_meta:
-        send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': [], 'skipMetadataUpdate': False})
+    send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': [], 'skipMetadataUpdate': False})
 
     all_chapters = fetch_chapter_list_wuxiabox(url, metadata)
     if not all_chapters:
@@ -707,12 +732,12 @@ def worker_wuxiabox_list(url, admin_email, metadata):
         if content:
             batch.append({'number': chap['number'], 'title': chap['title'], 'content': content})
             if len(batch) >= 5:
-                send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': batch, 'skipMetadataUpdate': skip_meta})
+                send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': batch, 'skipMetadataUpdate': True})
                 batch = []
                 time.sleep(1)
                 
     if batch:
-        send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': batch, 'skipMetadataUpdate': skip_meta})
+        send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': batch, 'skipMetadataUpdate': True})
 
 # ==========================================
 # 🔴 5. FreeWebNovel Logic
@@ -757,7 +782,7 @@ def fetch_metadata_freewebnovel(url):
 
         return {
             'title': title, 'description': description, 'cover': cover,
-            'status': status, 'category': category, 'tags': tags
+            'status': status, 'category': category, 'tags': tags, 'sourceUrl': url
         }
     except Exception as e:
         print(f"Error Freewebnovel Meta: {e}")
@@ -816,8 +841,7 @@ def worker_freewebnovel_list(url, admin_email, metadata):
     existing_chapters = check_existing_chapters(metadata['title'])
     skip_meta = len(existing_chapters) > 0
     
-    if not skip_meta:
-        send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': [], 'skipMetadataUpdate': False})
+    send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': [], 'skipMetadataUpdate': False})
 
     all_chapters = fetch_chapter_list_freewebnovel(url)
     
@@ -831,12 +855,12 @@ def worker_freewebnovel_list(url, admin_email, metadata):
         if content:
             batch.append({'number': chap['number'], 'title': chap['title'], 'content': content})
             if len(batch) >= 5:
-                send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': batch, 'skipMetadataUpdate': skip_meta})
+                send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': batch, 'skipMetadataUpdate': True})
                 batch = []
                 time.sleep(1)
                 
     if batch:
-        send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': batch, 'skipMetadataUpdate': skip_meta})
+        send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': batch, 'skipMetadataUpdate': True})
 
 # ==========================================
 # Main Orchestrator
