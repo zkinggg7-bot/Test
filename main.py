@@ -8,7 +8,7 @@ import re
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from bs4 import BeautifulSoup
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import urlparse, urljoin
 
 # ==========================================
@@ -62,6 +62,46 @@ def fix_image_url(url, base_url='https://api.rewayat.club'):
     elif not url.startswith('http'):
         return base_url + '/' + url
     return url
+
+def parse_relative_date(date_str):
+    """تحويل التواريخ النسبية (منذ 5 ساعات) إلى تاريخ حقيقي"""
+    try:
+        if not date_str: return datetime.now().isoformat()
+        
+        now = datetime.now()
+        text = date_str.lower().strip()
+        
+        # إزالة كلمات زائدة
+        text = text.replace('updated', '').replace('ago', '').strip()
+        
+        # استخراج الرقم والوحدة
+        match = re.search(r'(\d+)\s*(sec|min|hour|day|week|month|year)', text)
+        if match:
+            amount = int(match.group(1))
+            unit = match.group(2)
+            
+            delta = timedelta(seconds=0)
+            if 'sec' in unit: delta = timedelta(seconds=amount)
+            elif 'min' in unit: delta = timedelta(minutes=amount)
+            elif 'hour' in unit: delta = timedelta(hours=amount)
+            elif 'day' in unit: delta = timedelta(days=amount)
+            elif 'week' in unit: delta = timedelta(weeks=amount)
+            elif 'month' in unit: delta = timedelta(days=amount * 30)
+            elif 'year' in unit: delta = timedelta(days=amount * 365)
+            
+            return (now - delta).isoformat()
+            
+        # محاولة قراءة تاريخ ثابت (May 20, 2024)
+        try:
+            # Common formats like "May 20, 2024"
+            dt = datetime.strptime(text, '%B %d, %Y')
+            return dt.isoformat()
+        except:
+            pass
+            
+        return now.isoformat()
+    except:
+        return datetime.now().isoformat()
 
 def send_data_to_backend(payload):
     """إرسال البيانات إلى الخادم الرئيسي"""
@@ -141,12 +181,12 @@ def fetch_metadata_rewayat(url):
         # 2. Fallback: Search in full text if not found
         if status == "مستمرة":
             if "مكتملة" in soup.get_text():
-                # Be careful not to match other things, but usually safe in metadata area
                 status = "مكتملة"
 
         return {
             'title': title, 'description': description, 'cover': cover_url,
-            'status': status, 'category': "عام", 'tags': [], 'sourceUrl': url
+            'status': status, 'category': "عام", 'tags': [], 'sourceUrl': url,
+            'lastUpdate': datetime.now().isoformat() # Fallback for rewayat
         }
     except Exception as e:
         print(f"Error rewayat metadata: {e}")
@@ -287,11 +327,19 @@ def fetch_metadata_madara(url):
                 if 'completed' in txt or 'مكتملة' in txt:
                     status = "مكتملة"
                     break
+        
+        # 🔥 Extract Last Update Time (Madara specific)
+        last_update = datetime.now().isoformat()
+        # Usually in .post-on or .post-date
+        update_node = soup.select_one('.post-on span') or soup.select_one('.post-on')
+        if update_node:
+            last_update = parse_relative_date(update_node.get_text(strip=True))
 
         return {
             'title': title, 'description': description, 'cover': cover,
             'status': status, 'category': category, 'tags': tags,
-            'novel_id': novel_id, 'sourceUrl': url
+            'novel_id': novel_id, 'sourceUrl': url,
+            'lastUpdate': last_update
         }
     except Exception as e:
         print(f"Error Madara Meta: {e}")
@@ -461,9 +509,17 @@ def fetch_metadata_novelfire(url):
         if completed_tag and 'Completed' in completed_tag.get_text(strip=True):
             status = "مكتملة"
 
+        # 🔥 Extract Last Update Time (NovelFire specific)
+        last_update = datetime.now().isoformat()
+        # Look for <p class="update"> inside .chapter-latest-container
+        update_node = soup.select_one('.chapter-latest-container .update')
+        if update_node:
+            last_update = parse_relative_date(update_node.get_text(strip=True))
+
         return {
             'title': title, 'description': description, 'cover': cover,
-            'status': status, 'category': category, 'tags': tags, 'sourceUrl': url
+            'status': status, 'category': category, 'tags': tags, 'sourceUrl': url,
+            'lastUpdate': last_update
         }
     except Exception as e:
         print(f"Error NovelFire Meta: {e}")
@@ -552,7 +608,7 @@ def worker_novelfire_list(url, admin_email, metadata):
     existing_chapters = check_existing_chapters(metadata['title'])
     skip_meta = len(existing_chapters) > 0
     
-    # Always update metadata to sync status (Completed) and sourceUrl
+    # Always update metadata to sync status (Completed), sourceUrl AND lastUpdate
     send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': [], 'skipMetadataUpdate': skip_meta})
 
     all_chapters = fetch_chapter_list_novelfire(url)
@@ -626,7 +682,8 @@ def fetch_metadata_wuxiabox(url):
         return {
             'title': title, 'description': description, 'cover': cover,
             'status': status, 'category': category, 'tags': tags,
-            'base_url': base_url, 'sourceUrl': url
+            'base_url': base_url, 'sourceUrl': url,
+            'lastUpdate': datetime.now().isoformat()
         }
     except Exception as e:
         print(f"Error WuxiaBox Meta: {e}")
@@ -794,7 +851,8 @@ def fetch_metadata_freewebnovel(url):
 
         return {
             'title': title, 'description': description, 'cover': cover,
-            'status': status, 'category': category, 'tags': tags, 'sourceUrl': url
+            'status': status, 'category': category, 'tags': tags, 'sourceUrl': url,
+            'lastUpdate': datetime.now().isoformat()
         }
     except Exception as e:
         print(f"Error Freewebnovel Meta: {e}")
@@ -888,15 +946,12 @@ def trigger_scrape():
     if auth_header != API_SECRET: return jsonify({'message': 'Unauthorized'}), 401
 
     data = request.json
-    url = data.get('url', '')
+    url = data.get('url', '').strip()
     admin_email = data.get('adminEmail')
     
-    if not url: return jsonify({'message': 'No URL'}), 400
+    if not url: return jsonify({'message': 'No URL provided'}), 400
 
     # Ensure URL is clean
-    url = url.strip()
-
-    # Domain check - using 'in' for relaxed matching
     if 'rewayat.club' in url:
         meta = fetch_metadata_rewayat(url)
         if not meta: return jsonify({'message': 'Failed metadata'}), 400
