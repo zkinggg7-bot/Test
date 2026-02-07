@@ -79,10 +79,10 @@ def fix_image_url(url, base_url='https://api.rewayat.club'):
 def parse_relative_date(date_str):
     """تحويل التواريخ النسبية (منذ 5 ساعات) إلى تاريخ حقيقي"""
     try:
-        if not date_str: return datetime.now().isoformat()
+        if not date_str: return None # Return None if invalid to avoid overwriting with NOW
         
         now = datetime.now()
-        text = date_str.lower().strip()
+        text = str(date_str).lower().strip()
         
         # إزالة كلمات زائدة
         text = text.replace('updated', '').replace('ago', '').strip()
@@ -104,17 +104,20 @@ def parse_relative_date(date_str):
             
             return (now - delta).isoformat()
             
-        # محاولة قراءة تاريخ ثابت (May 20, 2024)
+        # محاولة قراءة تاريخ ثابت (May 20, 2024 / 2025/12/15)
         try:
-            # Common formats like "May 20, 2024"
-            dt = datetime.strptime(text, '%B %d, %Y')
-            return dt.isoformat()
+            # Try MM/DD/YYYY or similar common formats
+            for fmt in ['%B %d, %Y', '%Y/%m/%d', '%d/%m/%Y', '%Y-%m-%d']:
+                try:
+                    dt = datetime.strptime(text, fmt)
+                    return dt.isoformat()
+                except: continue
         except:
             pass
             
-        return now.isoformat()
+        return None # Return None if we can't parse it, don't default to NOW
     except:
-        return datetime.now().isoformat()
+        return None
 
 def send_data_to_backend(payload):
     """إرسال البيانات إلى الخادم الرئيسي"""
@@ -155,6 +158,7 @@ def extract_from_nuxt(soup):
         for script in scripts:
             if script.string and 'window.__NUXT__' in script.string:
                 content = script.string
+                # Extract poster
                 match = re.search(r'poster_url:"(.*?)"', content)
                 if not match: match = re.search(r'poster:"(.*?)"', content)
                 if match:
@@ -196,10 +200,26 @@ def fetch_metadata_rewayat(url):
             if "مكتملة" in soup.get_text():
                 status = "مكتملة"
 
+        # 🔥 EXTRACT REAL LAST UPDATE DATE (NUXT/Vue Logic) 🔥
+        last_update = None
+        # Try finding date in list items (usually subtitle)
+        # Look for pattern YYYY/MM/DD or similar in v-list-item__subtitle
+        subtitles = soup.find_all(class_='v-list-item__subtitle')
+        for sub in subtitles:
+            txt = sub.get_text(strip=True)
+            # Match date
+            date_match = re.search(r'(\d{4}/\d{1,2}/\d{1,2})', txt)
+            if date_match:
+                last_update = parse_relative_date(date_match.group(1))
+                break # Found the latest one (usually first)
+        
+        if not last_update:
+             last_update = datetime.now().isoformat() # Fallback only if parse failed
+
         return {
             'title': title, 'description': description, 'cover': cover_url,
             'status': status, 'category': "عام", 'tags': [], 'sourceUrl': url,
-            'lastUpdate': datetime.now().isoformat() # Fallback for rewayat
+            'lastUpdate': last_update
         }
     except Exception as e:
         print(f"Error rewayat metadata: {e}")
@@ -269,6 +289,17 @@ def worker_rewayat_probe(url, admin_email, metadata):
 def get_base_url(url):
     parsed = urlparse(url)
     return f"{parsed.scheme}://{parsed.netloc}"
+
+def clean_madara_title(raw_title):
+    """
+    Cleans titles like:
+    - الفصل 154: أحرف الداو... -> أحرف الداو...
+    - Chapter 154 - The beginning -> The beginning
+    """
+    # Regex to remove "Chapter X :" or "الفصل X -" etc.
+    # Matches start of string, optional words Chapter/الفصل, number, separators
+    cleaned = re.sub(r'^\s*(?:Chapter|الفصل|فصل)?\s*\d+\s*[:\-–]\s*', '', raw_title, flags=re.IGNORECASE).strip()
+    return cleaned if cleaned else raw_title # Return original if cleaned is empty
 
 def fetch_metadata_madara(url):
     try:
@@ -342,11 +373,16 @@ def fetch_metadata_madara(url):
                     break
         
         # 🔥 Extract Last Update Time (Madara specific)
-        last_update = datetime.now().isoformat()
-        # Usually in .post-on or .post-date
+        last_update = None
+        # Usually in .post-on or .post-date or .chapter-item .post-on
+        # We try to get the very first occurrence which usually belongs to the latest chapter
         update_node = soup.select_one('.post-on span') or soup.select_one('.post-on')
         if update_node:
-            last_update = parse_relative_date(update_node.get_text(strip=True))
+            raw_date = update_node.get_text(strip=True)
+            last_update = parse_relative_date(raw_date)
+
+        if not last_update:
+            last_update = datetime.now().isoformat()
 
         return {
             'title': title, 'description': description, 'cover': cover,
@@ -370,9 +406,13 @@ def parse_madara_chapters_from_html(soup):
         if a:
             link = a.get('href')
             raw_title = a.get_text(strip=True)
+            
+            # Extract Number
             num_match = re.search(r'(\d+)', raw_title)
             number = int(num_match.group(1)) if num_match else 0
-            clean_title = re.sub(r'^\d+\s*[-–]\s*', '', raw_title).strip()
+            
+            # 🔥 Clean Title Logic
+            clean_title = clean_madara_title(raw_title)
             
             if number > 0:
                 chapters.append({'number': number, 'url': link, 'title': clean_title})
@@ -547,7 +587,8 @@ def fetch_metadata_novelfire(url):
         last_update = datetime.now().isoformat()
         update_node = soup.select_one('.chapter-latest-container .update')
         if update_node:
-            last_update = parse_relative_date(update_node.get_text(strip=True))
+            pd = parse_relative_date(update_node.get_text(strip=True))
+            if pd: last_update = pd
 
         return {
             'title': title, 'description': description, 'cover': cover,
